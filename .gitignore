@@ -1,0 +1,32 @@
+# Heavy / generated artifacts
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.log
+
+# Build / dist outputs
+dist/
+build/
+
+# Model weights — too big to ship, friends/colleagues download separately
+models/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local env / secrets
+.env
+.env.local
+
+# Bridge runtime files
+*.pid
+runtime-port.json
+
+# uv lock — keep
+# (don't ignore uv.lock; it's needed for reproducible installs)

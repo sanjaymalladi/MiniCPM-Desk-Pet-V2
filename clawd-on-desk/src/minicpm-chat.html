@@ -1,0 +1,1353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' 'unsafe-inline'; connect-src http://127.0.0.1:8765 http://localhost:8765; img-src 'self' data:;">
+<title>MiniCPM</title>
+<style>
+  :root {
+    --bg: rgba(22, 26, 34, 0.92);
+    --text: #e6e8ee;
+    --muted: #9aa3b6;
+    --accent: #9b8cff;
+    --border: rgba(255, 255, 255, 0.06);
+    --inner-edge: rgba(255, 255, 255, 0.04);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: rgba(255, 255, 255, 0.94);
+      --text: #1c1c20;
+      --muted: #6c7180;
+      --accent: #6b56ff;
+      --border: rgba(0, 0, 0, 0.05);
+      --inner-edge: rgba(255, 255, 255, 0.6);
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; background: transparent; color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    font-size: 13px; line-height: 1.5; overflow: hidden;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Shell hugs the window edges; small inset only on sides where the tail
+     pokes out. The bubble fills the rest exactly so there is no visible
+     halo / shadow plate behind it. */
+  .shell {
+    position: fixed; inset: 7px;
+    display: grid; place-items: center;
+  }
+
+  .bubble {
+    position: relative;
+    width: 100%; max-width: 100%;
+    background: var(--bg);
+    backdrop-filter: blur(28px) saturate(150%);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 7px 12px;
+    /* A faint inner highlight gives the edge a glassy fade rather than a
+       hard 1-pixel line — looks softer at any size. */
+    box-shadow: inset 0 1px 0 var(--inner-edge);
+    opacity: 0; transform: translateY(2px) scale(0.99);
+    transition: opacity 160ms ease, transform 160ms ease;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .bubble.show { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+  .bubble.fading { opacity: 0; transform: translateY(2px) scale(0.99); }
+
+  /* Bubble tail (small triangle pointing toward the pet). Position adjusts
+     based on which side of the pet we're rendered. */
+  .tail {
+    position: absolute;
+    width: 11px; height: 11px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    transform: rotate(45deg);
+    border-radius: 3px;
+    backdrop-filter: blur(28px) saturate(150%);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+  }
+  .bubble[data-side="right"] .tail { left: -6px; top: 50%; margin-top: -6px;
+    border-right: none; border-top: none; }
+  .bubble[data-side="left"] .tail { right: -6px; top: 50%; margin-top: -6px;
+    border-left: none; border-bottom: none; }
+  .bubble[data-side="below"] .tail { top: -6px; left: 50%; margin-left: -6px;
+    border-right: none; border-bottom: none; }
+  .bubble[data-side="above"] .tail { bottom: -6px; left: 50%; margin-left: -6px;
+    border-left: none; border-top: none; }
+
+  /* — Drag-to-position edit mode (toggled by Settings) — */
+  body.edit-mode { -webkit-app-region: drag; cursor: grab; }
+  body.edit-mode .bubble {
+    cursor: grab;
+    outline: 2px dashed rgba(107, 86, 255, 0.55);
+    outline-offset: 4px;
+    animation: editPulse 1.4s ease-in-out infinite;
+  }
+  body.edit-mode:active, body.edit-mode .bubble:active { cursor: grabbing; }
+  @keyframes editPulse {
+    0%, 100% { outline-color: rgba(107, 86, 255, 0.55); }
+    50%      { outline-color: rgba(107, 86, 255, 0.20); }
+  }
+
+  /* — STATE: ask (input prompt) — */
+  textarea {
+    width: 100%;
+    border: none; outline: none; resize: none;
+    background: transparent; color: var(--text);
+    font: inherit; font-size: 13px;
+    max-height: 120px; min-height: 18px;
+    user-select: text;
+    -webkit-app-region: no-drag;
+    display: block;
+  }
+  textarea::placeholder { color: var(--muted); }
+
+  /* — Continuous-chat layout (size follows content; bubble grows smoothly) — */
+  .chat-pane {
+    display: flex; flex-direction: column;
+    gap: 4px;
+  }
+  /* Top region: previous reply, max ~120px then internal scroll. */
+  .last-reply-region {
+    flex: 0 1 auto;
+    max-height: 120px;
+    overflow-y: auto;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    user-select: text;
+    -webkit-app-region: no-drag;
+    padding-right: 2px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid var(--border);
+  }
+  .last-reply-region::-webkit-scrollbar { width: 4px; }
+  .last-reply-region::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  /* Bottom: input grows with typing up to 200px then internally scrolls. */
+  .ask-input-wrap {
+    flex: 0 0 auto;
+  }
+  .ask-input-wrap textarea {
+    max-height: 200px;
+    line-height: 1.5;
+  }
+  .ask-input-wrap textarea::-webkit-scrollbar { width: 4px; }
+  .ask-input-wrap textarea::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* — STATE: speak (assistant reply) — */
+  .speak {
+    user-select: text; -webkit-user-select: text;
+    white-space: pre-wrap; word-wrap: break-word;
+    max-height: 320px; overflow-y: auto;
+    -webkit-app-region: no-drag;
+  }
+  .speak::-webkit-scrollbar { width: 5px; }
+  .speak::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .speak.streaming::after {
+    content: "▍"; color: var(--accent); margin-left: 2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Whispered thought stream — soft gray text with a left border that
+     stands in for "this is a quoted side-channel". No italic (Chinese
+     fonts get visually skewed) and no emoji. */
+  .think-stream {
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    user-select: text;
+    border-left: 2px solid var(--accent);
+    padding-left: 12px;
+    max-height: 280px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-app-region: no-drag;
+    opacity: 0.92;
+  }
+  .think-stream::-webkit-scrollbar { width: 4px; }
+  .think-stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .think-stream::after {
+    content: " ●";
+    color: var(--accent);
+    margin-left: 4px;
+    font-size: 7px;
+    vertical-align: 2px;
+    animation: thinkBlink 1.4s ease-in-out infinite;
+  }
+  @keyframes thinkBlink {
+    0%, 100% { opacity: 0.25; }
+    50%      { opacity: 0.9; }
+  }
+
+  /* — STATE: thinking (transient hint while sidecar is starting / first chunk delay) — */
+  .thinking-row {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--muted); font-size: 12px;
+  }
+  .spinner {
+    display: inline-block; width: 11px; height: 11px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Tiny "● new revision available" pill that sits in the corner of the
+     bubble. Click to apply the update. */
+  .upd-pill {
+    position: absolute;
+    top: 6px; right: 8px;
+    z-index: 10;
+    font-size: 10px;
+    color: var(--accent);
+    background: rgba(155,140,255,0.10);
+    border: 1px solid rgba(155,140,255,0.35);
+    padding: 2px 7px;
+    border-radius: 999px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-app-region: no-drag;
+    display: none;
+    align-items: center;
+    gap: 5px;
+    line-height: 1.2;
+  }
+  .upd-pill::before {
+    content: "●";
+    color: var(--accent);
+    font-size: 8px;
+    animation: thinkBlink 1.4s ease-in-out infinite;
+  }
+  .upd-pill:hover { background: rgba(155,140,255,0.18); }
+  /* Inline progress shown inside the bubble while updating. */
+  .upd-progress {
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    padding: 6px 4px;
+  }
+  .upd-progress .bar {
+    margin-top: 7px;
+    height: 4px;
+    background: rgba(155,140,255,0.15);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .upd-progress .bar > i {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 200ms ease;
+    border-radius: 2px;
+  }
+
+  .err-text { color: var(--danger, #ff6b6b); font-size: 11px; }
+  .err-text pre {
+    margin-top: 6px; padding: 6px; background: rgba(255,255,255,0.04);
+    color: var(--muted); border-radius: 4px; font-size: 10px;
+    white-space: pre-wrap; max-height: 140px; overflow: auto; user-select: text;
+  }
+  @media (prefers-color-scheme: light) {
+    .err-text pre { background: rgba(0,0,0,0.04); }
+  }
+</style>
+</head>
+<body oncontextmenu="window.minicpm && window.minicpm.openContextMenu(); event.preventDefault();">
+<div class="shell">
+  <div class="bubble" id="bubble" data-side="right">
+    <div class="tail"></div>
+    <div class="upd-pill" id="updPill" title="点击更新模型">新版本</div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<script>
+const SIDECAR_URL = "http://127.0.0.1:8765";
+
+// ── element refs ──
+const bubble = document.getElementById("bubble");
+const content = document.getElementById("content");
+
+// ── module state ──
+let phase = "hidden";        // hidden | starting | ask | thinking | speak | error
+let booted = false;
+let sidecarUrl = null;
+let history = [];            // multi-turn conversation; persists across opens
+let abortCtrl = null;
+let fadeTimer = null;
+let inputEl = null;          // <textarea> while in ask state
+
+// thinking defaults to false because:
+//   1) the persona LoRA isn't fine-tuned with <think>...</think> structure,
+//      so it traps all output inside the think block and never emits </think>
+//   2) for casual chat the answer should arrive fast, not after deliberation
+// User can still flip it on with ⌘⇧T (works fine on base model).
+let settings = { thinking: false };
+
+// ── window helpers ──
+function clearFade() {
+  if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+}
+
+async function setBubbleSize(width, height) {
+  // shell has 7px inset on each side (just enough for the tail to poke out)
+  if (window.minicpm && window.minicpm.resize) {
+    await window.minicpm.resize(width + 14, height + 14);
+  }
+}
+
+async function showBubble() {
+  clearFade();
+  bubble.classList.remove("fading");
+  // The window itself may have been hidden via hideWindow() while we were
+  // waiting on the model. Bring it back before animating the bubble in.
+  if (window.minicpm && window.minicpm.showWindow) {
+    try { await window.minicpm.showWindow(); } catch {}
+  }
+  requestAnimationFrame(() => bubble.classList.add("show"));
+}
+
+async function hideBubble({ fade = true } = {}) {
+  clearFade();
+  await clearChatAnchor();
+  if (!fade) {
+    bubble.classList.remove("show", "fading");
+    if (window.minicpm && window.minicpm.hideWindow) await window.minicpm.hideWindow();
+    phase = "hidden";
+    return;
+  }
+  bubble.classList.add("fading");
+  bubble.classList.remove("show");
+  fadeTimer = setTimeout(async () => {
+    fadeTimer = null;
+    bubble.classList.remove("fading");
+    if (window.minicpm && window.minicpm.hideWindow) await window.minicpm.hideWindow();
+    phase = "hidden";
+  }, 220);
+}
+
+function setSide(side) {
+  // side from main: 'right' | 'left' | 'above' | 'below'
+  bubble.setAttribute("data-side", side || "right");
+}
+
+// ── bootstrap (Python sidecar) ──
+async function ensureBooted() {
+  if (booted) return true;
+  showStarting();
+  const r = await window.minicpm.start({});
+  if (!r.ok) {
+    showError(r.error || "无法启动本地推理服务");
+    return false;
+  }
+  sidecarUrl = r.url || SIDECAR_URL;
+  booted = true;
+  return true;
+}
+
+// ── render: starting ──
+async function showStarting() {
+  phase = "starting";
+  const text = "正在唤醒 MiniCPM…首次启动需要 5–10 秒编译 MPS kernel。";
+  content.innerHTML = `
+    <div class="thinking-row"><span class="spinner"></span><span>正在唤醒 MiniCPM…</span></div>
+    <div style="margin-top:5px;font-size:10px;color:var(--muted)">首次启动需要 5–10 秒编译 MPS kernel。</div>
+  `;
+  await measureAndShow({ width: naturalDisplayWidth(text) });
+}
+
+// ── render: error ──
+async function showError(msg) {
+  phase = "error";
+  content.innerHTML = `<div class="err-text">⚠️ ${escapeHtml(msg.split("\n")[0])}<pre>${escapeHtml(msg)}</pre></div>`;
+  await measureAndShow({ width: naturalDisplayWidth(msg, { max: 360 }) });
+}
+
+// ── render: ask (input field) ──
+// When there's a `lastReply`, render in continuous-chat mode: a fixed-
+// size bubble where the previous reply scrolls inside its own region
+// at the top, and the input box is pinned at the bottom. While typing,
+// the bubble's outer dimensions stay locked — only inner regions scroll.
+async function showAsk(lastReply) {
+  clearFade();
+  phase = "ask";
+  abortCtrl = null;
+
+  // Whenever we enter ask-with-reply, FIRST clear any prior chat anchor
+  // (so initial measurement is centered), then re-pin after the bubble
+  // has settled. This avoids the bubble sliding sideways on first show.
+  if (window.minicpm && window.minicpm.setChatAnchor) {
+    try { await window.minicpm.setChatAnchor(null); } catch {}
+  }
+
+  if (lastReply) {
+    // Continuous-chat layout: bubble starts compact, grows as user types.
+    // Outer height tracks content.offsetHeight via measureAndShow.
+    content.innerHTML = `
+      <div class="chat-pane">
+        <div class="last-reply-region" id="last-reply-region">${escapeHtml(lastReply)}</div>
+        <div class="ask-input-wrap">
+          <textarea id="ask-input" placeholder="问问看…" rows="1"></textarea>
+        </div>
+      </div>`;
+    inputEl = document.getElementById("ask-input");
+    inputEl.addEventListener("input", () => autoresizeFixed(inputEl));
+    inputEl.addEventListener("keydown", onAskKey);
+    await measureAndShow();
+    const lr = document.getElementById("last-reply-region");
+    if (lr) lr.scrollTop = lr.scrollHeight;
+    // Now that the bubble is sized & placed, pin its bottom Y so future
+    // grows extend UP (textarea stays under the user's gaze) instead of
+    // re-centering on the pet (which would shove the textarea down too).
+    if (window.minicpm && window.minicpm.setChatAnchor) {
+      const r = bubble.getBoundingClientRect();
+      // measureAndShow → setBounds set the window position; we need its
+      // BOTTOM in screen coords. window.screenY + window inner height
+      // approximates the bottom of the bubble panel.
+      const bottomY = (window.screenY || 0) + window.innerHeight;
+      try { await window.minicpm.setChatAnchor(bottomY); } catch {}
+    }
+  } else {
+    // First-open compact layout: bubble starts as a tiny pill that just
+    // fits the placeholder text, expanding horizontally as user types.
+    content.innerHTML = `<textarea id="ask-input" placeholder="问问看…" rows="1"></textarea>`;
+    inputEl = document.getElementById("ask-input");
+    inputEl.addEventListener("input", () => autoresize(inputEl));
+    inputEl.addEventListener("keydown", onAskKey);
+    await measureAndShow({ width: naturalAskWidth("") });
+  }
+  if (window.minicpm && window.minicpm.focusWindow) {
+    try { await window.minicpm.focusWindow(); } catch {}
+  }
+  setTimeout(() => inputEl && inputEl.focus(), 30);
+}
+
+// In continuous-chat mode the bubble follows content size: empty = small,
+// long input = big. Resize the textarea internally then ask the window
+// to remeasure so its outer height tracks. animate:false avoids the
+// CSS opacity transition kicking in on every keystroke.
+function autoresizeFixed(ta) {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+  measureAndShow({ animate: false });
+}
+
+function autoresize(ta) {
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 96) + "px";
+  // Bubble width grows with text — empty = ~100px, full multi-line = 320px max.
+  const w = naturalAskWidth(ta.value);
+  measureAndShow({ animate: false, width: w });
+}
+
+async function onAskKey(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = "";
+    await submit(text);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    await dismiss();
+  }
+}
+
+// ── render: thinking (transient — pet does the heavy work animating) ──
+async function showThinking(label = "正在思考…") {
+  phase = "thinking";
+  content.innerHTML = `<div class="thinking-row"><span class="spinner"></span><span>${escapeHtml(label)}</span></div>`;
+  await measureAndShow();
+}
+
+async function clearChatAnchor() {
+  if (window.minicpm && window.minicpm.setChatAnchor) {
+    try { await window.minicpm.setChatAnchor(null); } catch {}
+  }
+}
+
+// ── render: think-stream (peek of the model's reasoning) ──
+async function showThink() {
+  phase = "think-stream";
+  await clearChatAnchor();
+  content.innerHTML = `<div class="think-stream" id="think-text"></div>`;
+  // Speak/think phases get a comfortable reading width up front so the
+  // streaming text doesn't wrap aggressively from the previous narrow
+  // ask bubble width.
+  await measureAndShow({ width: 300 });
+}
+
+// ── render: speak (streamed assistant reply) ──
+async function showSpeak() {
+  phase = "speak";
+  await clearChatAnchor();
+  content.innerHTML = `<div class="speak streaming" id="speak"></div>`;
+  await measureAndShow({ width: 300 });
+}
+
+// Animate the bubble fading out, briefly drop the window, then fade it back
+// in with new content. Used when the model finishes thinking and starts
+// speaking — gives a "thought, then said it" cadence.
+async function fadeOutAndHide(ms = 220) {
+  return new Promise((resolve) => {
+    clearFade();
+    bubble.classList.add("fading");
+    bubble.classList.remove("show");
+    setTimeout(async () => {
+      bubble.classList.remove("fading");
+      if (window.minicpm && window.minicpm.hideWindow) {
+        try { await window.minicpm.hideWindow(); } catch {}
+      }
+      resolve();
+    }, ms);
+  });
+}
+
+// ── helpers ──
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+// Hidden measurement span — used to compute the natural width of the
+// currently-typed text so the bubble window can auto-fit to it.
+const widthMeasurer = (() => {
+  const s = document.createElement("span");
+  s.style.cssText = "visibility:hidden; position:absolute; left:-9999px; top:0; white-space:pre; font:inherit;";
+  document.body.appendChild(s);
+  return s;
+})();
+
+async function measureAndShow({ animate = true, width = null } = {}) {
+  const padY = 14;
+  bubble.style.height = "auto";
+  const cw = width !== null
+    ? width
+    : Math.max(220, bubble.offsetWidth || 280);
+  const ch = Math.max(28, content.offsetHeight + padY);
+  await setBubbleSize(cw, ch);
+  if (animate) showBubble();
+  else bubble.classList.add("show");
+}
+
+// Compute the natural width an input + content needs at the current font.
+// Used in compact ask-mode (no lastReply) so the bubble starts tiny and
+// expands with the typed text. Returns a value in pixels including all
+// horizontal padding/inset.
+function naturalAskWidth(text) {
+  const sample = text && text.length > 0 ? text : "问问看…";
+  widthMeasurer.style.font = window.getComputedStyle(content).font;
+  widthMeasurer.textContent = sample;
+  const textW = widthMeasurer.offsetWidth;
+  return Math.max(80, Math.min(320, Math.round(textW + 32)));
+}
+
+// For fixed-text panels (command replies, errors, narration, speak phase, …)
+// the bubble should be wide enough to read comfortably without breaking
+// short prompts onto multiple lines. Measures the longest line of `text`
+// and clamps to a comfortable range.
+function naturalDisplayWidth(text, { min = 220, max = 320, padding = 32 } = {}) {
+  const lines = String(text || "").split(/\r?\n/);
+  widthMeasurer.style.font = window.getComputedStyle(content).font;
+  let widest = 0;
+  for (const line of lines) {
+    widthMeasurer.textContent = line || " ";
+    if (widthMeasurer.offsetWidth > widest) widest = widthMeasurer.offsetWidth;
+  }
+  return Math.max(min, Math.min(max, Math.round(widest + padding)));
+}
+
+// ── flow ──
+// Render a command result inside the bubble. Auto-fades after dwell.
+async function showCommandReply(cmd) {
+  clearFade();
+  phase = "narration";
+  const text = cmd.text || "";
+  const escaped = escapeHtml(text);
+  const accent = cmd.ok === false ? "#ff6b6b" : "var(--accent)";
+  content.innerHTML = `
+    <div style="display:flex; gap:6px; align-items:flex-start;">
+      <span style="font-size:13px; line-height:1; color:${accent}; padding-top:1px;">🐾</span>
+      <span style="font-size:13px; color:var(--text); white-space:pre-wrap; word-wrap:break-word;">${escaped}</span>
+    </div>`;
+  // +30 padding for the icon column so multi-line replies don't wrap
+  // tighter than the icon alignment.
+  await measureAndShow({ animate: true, width: naturalDisplayWidth(text, { min: 240, padding: 56 }) });
+  const dwell = clamp(2800 + text.length * 100, 3500, 11000);
+  fadeTimer = setTimeout(() => {
+    fadeTimer = null;
+    hideBubble({ fade: true });
+  }, dwell);
+}
+
+// Same visual as showCommandReply, but pinned in place — no fade — used
+// while a long-running command (adapter swap, model update) is mid-flight.
+async function showCommandProgress(text) {
+  clearFade();
+  phase = "narration";
+  const escaped = escapeHtml(text || "");
+  content.innerHTML = `
+    <div style="display:flex; gap:6px; align-items:flex-start;">
+      <span class="spinner" style="margin-top:3px;"></span>
+      <span style="font-size:13px; color:var(--text); white-space:pre-wrap; word-wrap:break-word;">${escaped}</span>
+    </div>`;
+  await measureAndShow({ animate: true, width: naturalDisplayWidth(text || "", { min: 220, padding: 56 }) });
+}
+
+// ── Intent classification: two-stage hybrid ──
+// Stage 1: loose regex layer — fast, no model call, ~95% of explicit phrasings.
+// Stage 2: LLM classifier — for fuzzy / colloquial messages that the regex
+//          misses. Constrains the model to emit a single token like
+//          "SWITCH_TO=neko" / "DISABLE" / "NONE", parses, and dispatches.
+//          Skipped for messages that don't smell like a command at all
+//          so casual chat stays fast.
+
+const RGX = {
+  status: /(你现在|当前|目前|现在).{0,4}(是什么|是啥|用的什么|用啥|什么模型|什么人格|哪个模型|哪个人格|是哪个)/,
+  list:   /(看看|看下|查看|有啥|有什么|哪些|列|列出).{0,5}(adapter|插件|皮肤|人格|风格|lora)/i,
+  off:    /(关掉|关闭|去掉|不要|脱掉|取消|卸|卸载).{0,4}(adapter|人格|皮肤|lora)/i
+       || null,                                  // placeholder; we OR below
+  off2:   /(用回|回到|切到|切回|换成|换到|去).{0,4}(原版|默认|base|普通|原始|裸|本来|纯净)/i,
+  swap:   /(切到|换到|换成|切换到|切换成|换上|穿上|戴上|启用|载入|加载|装上|套上|挂上).{0,2}([\u4e00-\u9fff\w-]{1,16})/i,
+  ucheck: /(检查|看看|查|有没|看一下).{0,4}(更新|新版|新版本)|(更新|新版).{0,4}(吗|么|嘛|没|？|\?)/,
+  uapply: /^(更新|升级|马上更新|去更新|更新一下|开始更新|马上升级|拉新版)\b/,
+};
+RGX.off = /(关掉|关闭|去掉|不要|脱掉|取消|卸|卸载).{0,4}(adapter|人格|皮肤|lora)/i;
+
+// With first-token scoring the classifier is ~150-300ms — cheap enough
+// that we can afford to ask the model on basically any message that
+// even hints at a management topic. Keep the gate generous.
+const COMMAND_HINTS = /(adapter|lora|人格|皮肤|风格|默认|原版|裸|纯净|普通|猫娘|宝宝|更新|升级|新版|hf|hugging|切|换|装|穿|戴|脱|关掉|关闭|启用|禁用|卸|挂上|套上|不要|别|去掉|取消|废|废掉|model|模型|皮)/i;
+
+async function tryHandleAsCommand(text, onProgress) {
+  const t = text.trim();
+  if (!t) return null;
+  const progress = onProgress || (async () => {});
+
+  // ── Stage 1: regex (free, instant) ──
+  const stage1 = matchByRegex(t);
+  if (stage1) return await dispatch(stage1, t, progress);
+
+  // ── Stage 2: LLM classifier (≈1-2s) — gated ──
+  // Only run for messages that look like they might be a management
+  // command. If you talk to the pet about anything else the request
+  // skips the classifier entirely and goes straight to chat.
+  if (t.length <= 50 && COMMAND_HINTS.test(t)) {
+    try {
+      await progress("…");
+      const intent = await classifyIntentWithLLM(t);
+      if (intent) return await dispatch(intent, t, progress);
+    } catch (err) {
+      console.warn("LLM classifier failed:", err);
+    }
+  }
+  return null; // fall through to chat
+}
+
+function matchByRegex(t) {
+  if (RGX.status.test(t)) return { intent: "status" };
+  if (RGX.uapply.test(t)) return { intent: "update_apply" };
+  if (RGX.ucheck.test(t)) return { intent: "update_check" };
+  if (RGX.list.test(t))   return { intent: "list" };
+  if (RGX.off.test(t))    return { intent: "off" };
+  if (RGX.off2.test(t))   return { intent: "off" };
+  const m = t.match(RGX.swap);
+  if (m && m[2]) {
+    let kw = m[2].trim().replace(/(吧|啊|呢|了|嘛|哦|哈|喵)+$/u, "").trim();
+    if (kw) return { intent: "switch", keyword: kw };
+  }
+  return null;
+}
+
+// Few-shot LLM classifier — the 0.9B base model with greedy decode and
+// 12 few-shot examples. ~350ms per call. We tried first-token logit
+// scoring with single-char labels but the logit signal-to-noise on
+// 0.9B is too low (correct vs wrong winner often <0.4 apart).
+async function classifyIntentWithLLM(text) {
+  const sysprompt =
+    "你是命令分类器。把用户的话归到下面一个标签，只输出标签本身：\n" +
+    "LIST_ADAPTER / SWITCH_TO=名字 / DISABLE_ADAPTER / UPDATE_CHECK / UPDATE_APPLY / STATUS / NONE\n\n" +
+    "用户：看看有哪些人格 → LIST_ADAPTER\n" +
+    "用户：列出 lora → LIST_ADAPTER\n" +
+    "用户：切到猫娘 → SWITCH_TO=猫娘\n" +
+    "用户：把猫娘装上 → SWITCH_TO=猫娘\n" +
+    "用户：来个 neko → SWITCH_TO=neko\n" +
+    "用户：回到原版 → DISABLE_ADAPTER\n" +
+    "用户：脱掉皮肤 → DISABLE_ADAPTER\n" +
+    "用户：我不要用猫娘了 → DISABLE_ADAPTER\n" +
+    "用户：你现在用什么模型 → STATUS\n" +
+    "用户：检查更新 → UPDATE_CHECK\n" +
+    "用户：去更新一下 → UPDATE_APPLY\n" +
+    "用户：你好 → NONE\n" +
+    "用户：今天天气真好 → NONE\n" +
+    "用户：1+1 等于几 → NONE\n" +
+    "用户：解释一下 LoRA 是什么 → NONE\n" +
+    "现在分类下面这句：";
+  const body = {
+    messages: [{ role: "user", content: text }],
+    system: sysprompt,
+    stream: false,
+    max_new_tokens: 16,
+    thinking: false,
+    temperature: 0,
+    top_p: 1,
+    repetition_penalty: 1.0,
+    silent: true,
+    disable_adapter: true,
+  };
+  const resp = await fetch(sidecarUrl + "/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) return null;
+  const d = await resp.json();
+  let reply = (d.content || "").trim();
+  reply = reply.split(/\r?\n/)[0].replace(/^[`'""'']+|[`'""''.。]+$/g, "").trim();
+  // Sometimes the model echoes the example format "用户：xxx → LABEL".
+  // Strip everything before the arrow so we get the label cleanly.
+  if (reply.includes("→")) reply = reply.split("→").pop().trim();
+  console.log("[classifier]", JSON.stringify(text), "→", JSON.stringify(reply));
+
+  // Search anywhere in the reply for one of the known labels — handles
+  // any leading garbage the model leaks through.
+  if (/\bNONE\b/i.test(reply))             return null;
+  if (/\bLIST_ADAPTER\b/i.test(reply))     return { intent: "list" };
+  if (/\bDISABLE_ADAPTER\b/i.test(reply))  return { intent: "off" };
+  if (/\bUPDATE_CHECK\b/i.test(reply))     return { intent: "update_check" };
+  if (/\bUPDATE_APPLY\b/i.test(reply))     return { intent: "update_apply" };
+  if (/\bSTATUS\b/i.test(reply))           return { intent: "status" };
+  const m = reply.match(/SWITCH_TO\s*=\s*([^\s,。]+)/i);
+  if (m) {
+    const kw = m[1].replace(/[「」『』"'""''.。]/g, "").trim();
+    if (kw) return { intent: "switch", keyword: kw };
+  }
+  return null;
+}
+
+async function dispatch(intent, fullMsg, progress) {
+  switch (intent.intent) {
+    case "status":       return runStatusQuery();
+    case "list":         return runAdapterList();
+    case "off":          return runAdapterOff(progress);
+    case "switch":       return runAdapterSwitchByKeyword(intent.keyword, fullMsg, progress);
+    case "update_check": return runUpdateCheck();
+    case "update_apply": return runUpdateApply(progress);
+    default:             return null;
+  }
+}
+
+async function runStatusQuery() {
+  const r = await fetch(sidecarUrl + "/api/health");
+  const d = await r.json();
+  const persona = d.persona || "default";
+  const model = d.model_name || "(unknown)";
+  const adapter = d.adapter ? (d.adapter.split("/").pop()) : null;
+  const text = adapter
+    ? `当前是 ${model}，套着 ${adapter} 这个 LoRA（人格: ${persona}）`
+    : `当前是 ${model}，没套 LoRA（人格: ${persona}）`;
+  return { ok: true, text };
+}
+
+async function runUpdateCheck() {
+  const r = await fetch(sidecarUrl + "/api/update-check");
+  const d = await r.json();
+  if (!d) return { ok: false, text: "查不动更新源诶，待会儿再问" };
+  if (d.available) {
+    return {
+      ok: true,
+      text: `有新版 ${d.remote_revision || "?"}！本地是 ${d.local_revision || "?"}。回我"更新"我就拉。`,
+    };
+  }
+  return { ok: true, text: `已经是最新啦（${d.local_revision || "?"}），不用动` };
+}
+
+async function runUpdateApply(progress) {
+  await progress("开始更新模型，下载完成前别关掉桌宠");
+  showUpdateProgress({ phase: "start" });
+  if (window.minicpm && window.minicpm.updateApply) {
+    await window.minicpm.updateApply();
+  }
+  await refreshUpdateBadge();
+  return {
+    ok: true,
+    text: "更新搞定，新版本已加载（清掉了之前的对话）",
+    resetHistory: true,
+  };
+}
+
+async function runAdapterList() {
+  const r = await fetch(sidecarUrl + "/api/adapters");
+  const d = await r.json();
+  if (!d.items || !d.items.length) {
+    return { ok: true, text: "本地 adapters/ 还没东西，再投喂我吧" };
+  }
+  const cur = d.current_name || null;
+  const lines = d.items.map((a) => `· ${a.name}${a.path === d.current ? "  ← 当前" : ""}`);
+  return {
+    ok: true,
+    text: `已发现的 LoRA：\n${lines.join("\n")}${cur ? "" : "\n（现在没套）"}`,
+  };
+}
+
+async function runAdapterOff(progress) {
+  await (progress || (() => {}))("正在卸下 LoRA，回到原版需要几秒…");
+  const r = await fetch(sidecarUrl + "/api/load-adapter", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: null }),
+  });
+  const d = await r.json();
+  if (!r.ok || !d.ok) return { ok: false, text: "卸载失败：" + (d.error || r.status) };
+  return {
+    ok: true,
+    text: "好啦，LoRA 卸下来了，现在是裸 base 模型（清空了对话）",
+    resetHistory: true,  // submit() will skip pushing this turn AND wipe `history`
+  };
+}
+
+async function runAdapterSwitchByKeyword(keyword, fullMessage, progress) {
+  const onProgress = progress || (async () => {});
+  // Synonym table: human keywords → adapter-name probe. `null` = "user
+  // wants to disable any adapter" (synonym for runAdapterOff).
+  const SYNONYMS = {
+    "猫娘": "neko",
+    "宝宝": "neko",
+    "neko": "neko",
+    "原版": null, "默认": null, "base": null, "原始": null, "裸": null, "纯净": null, "普通": null,
+  };
+
+  const r = await fetch(sidecarUrl + "/api/adapters");
+  const d = await r.json();
+  if (!d.items || !d.items.length) {
+    return { ok: true, text: "找不到 adapter 仓库，先把 LoRA 放进 adapters/" };
+  }
+
+  // ── Tolerant keyword resolution ──────────────────────────────────────
+  // The classifier sometimes truncates a multi-char Chinese keyword
+  // (e.g. "猫娘" → "娘"). To survive that, try several strategies in
+  // order of confidence and short-circuit on the first hit.
+  const kw = keyword.toLowerCase().trim();
+
+  // 1) Direct synonym hit.
+  if (kw in SYNONYMS) {
+    const target = SYNONYMS[kw];
+    if (target === null) return runAdapterOff(onProgress);
+    return await applySwitch(target);
+  }
+  // 2) The keyword is a *substring* of some known synonym key (handles
+  //    classifier truncations like "娘" → matches "猫娘").
+  for (const key of Object.keys(SYNONYMS)) {
+    if (key.includes(kw) || kw.includes(key)) {
+      const target = SYNONYMS[key];
+      if (target === null) return runAdapterOff(onProgress);
+      return await applySwitch(target);
+    }
+  }
+  // 3) Direct match against adapter names (substring, case-insensitive).
+  return await applySwitch(kw);
+
+  // ── helpers ──
+  async function applySwitch(probe) {
+    const pick = d.items.find((a) => a.name.toLowerCase().includes(probe.toLowerCase()));
+    if (!pick) {
+      const names = d.items.map((a) => a.name).join("、");
+      return { ok: true, text: `没找到「${keyword}」对应的 LoRA。我有的：${names}` };
+    }
+    if (pick.path === d.current) {
+      return { ok: true, text: `${pick.name} 已经在用啦，不用切` };
+    }
+    return await doSwap(pick);
+  }
+  async function doSwap(pick) {
+    await onProgress(`正在切到 ${pick.name}…加载 LoRA 大概要几秒`);
+    const swap = await fetch(sidecarUrl + "/api/load-adapter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: pick.path }),
+    });
+    const sd = await swap.json();
+    if (!swap.ok || !sd.ok) return { ok: false, text: "切换失败：" + (sd.error || swap.status) };
+
+    // Persona-LoRAs don't follow the <think> chat template, so flip
+    // thinking off when switching INTO one. Going back to base leaves
+    // the user's preference alone.
+    let extra = "";
+    const newPersona = sd.persona || "default";
+    if (newPersona !== "default" && settings.thinking) {
+      settings.thinking = false;
+      extra = "（关掉了思考模式）";
+    }
+    return {
+      ok: true,
+      text: `好啦，已经切到 ${pick.name}${extra}（清掉了之前的对话）`,
+      resetHistory: true,
+    };
+  }
+}
+
+async function submit(text) {
+  // Try command intents first. If matched, render the result as the
+  // assistant turn and skip the model call entirely.
+  try {
+    const cmd = await tryHandleAsCommand(text, async (progressText) => {
+      // Show interim progress immediately so the user knows the request
+      // is being worked on (adapter swaps take ~3-4 s).
+      await showCommandProgress(progressText);
+    });
+    if (cmd) {
+      if (cmd.resetHistory) {
+        // Adapter / model swap: the chat "voice" just changed, so we wipe
+        // the entire prior history AND we don't even keep this admin turn
+        // — meta-config chatter shouldn't anchor the new model.
+        history = [];
+      } else {
+        history.push({ role: "user", content: text });
+        history.push({ role: "assistant", content: cmd.text });
+      }
+      await showCommandReply(cmd);
+      return;
+    }
+  } catch (err) {
+    console.error("command dispatch error:", err);
+  }
+
+  history.push({ role: "user", content: text });
+
+  // Tell the sidecar: start generating. The sidecar pushes pet states
+  // (thinking → working → attention) to clawd-on-desk over HTTP, so the
+  // pet animates while we wait.
+  abortCtrl = new AbortController();
+
+  // Brief "thinking" hint, then hide the bubble so the pet's own reaction
+  // animation takes the spotlight. The bubble reappears as soon as the
+  // first delta arrives.
+  await showThinking("…");
+  setTimeout(() => {
+    if (phase === "thinking") hideBubble({ fade: true });
+  }, 350);
+
+  let replyAcc = "";
+  let thinkAcc = "";
+  let speakEl = null;
+  let thinkEl = null;
+  let sawThink = false;
+  let sawReply = false;
+  let typer = null;
+
+  // Re-measure + auto-scroll the active streaming pane on every painted char.
+  function onTick() {
+    measureAndShow({ animate: false });
+    if (typer && typer.target) typer.target.scrollTop = typer.target.scrollHeight;
+  }
+
+  // Pull persisted generation params from main proc on every submit so
+  // the Settings tab can hot-tune them without bouncing the bubble.
+  let chatParams = {};
+  try {
+    chatParams = (window.minicpm && typeof window.minicpm.getChatParams === "function")
+      ? (await window.minicpm.getChatParams()) || {}
+      : {};
+  } catch {}
+  // settings.thinking (in-bubble toggle, ⌘⇧T) takes precedence over the
+  // persisted default when the user has toggled it during this session.
+  const effectiveThinking = (typeof settings.thinking === "boolean")
+    ? settings.thinking
+    : !!chatParams.thinking;
+
+  try {
+    const resp = await fetch(sidecarUrl + "/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: history,
+        stream: true,
+        max_new_tokens: chatParams.max_new_tokens || 768,
+        temperature: (typeof chatParams.temperature === "number") ? chatParams.temperature : 0.6,
+        top_p: (typeof chatParams.top_p === "number") ? chatParams.top_p : 0.95,
+        top_k: (typeof chatParams.top_k === "number") ? chatParams.top_k : 0,
+        repetition_penalty: (typeof chatParams.repetition_penalty === "number") ? chatParams.repetition_penalty : 1.05,
+        thinking: effectiveThinking,
+      }),
+      signal: abortCtrl.signal,
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!block.startsWith("data:")) continue;
+        const payload = block.slice(5).trim();
+        if (!payload) continue;
+        let obj;
+        try { obj = JSON.parse(payload); } catch { continue; }
+
+        if (obj.event === "think" && settings.thinking) {
+          if (!sawThink) {
+            sawThink = true;
+            await showThink();
+            thinkEl = document.getElementById("think-text");
+            typer = new Typewriter(thinkEl, { onChange: onTick });
+          }
+          thinkAcc += obj.content;
+          typer.feed(obj.content);
+        } else if (obj.event === "delta") {
+          // First reply chunk → drain whatever's left in the thought
+          // typewriter, then transition to a fresh reply bubble.
+          if (!sawReply) {
+            sawReply = true;
+            if (typer) await typer.drain();
+            if (sawThink && phase === "think-stream") {
+              await fadeOutAndHide(220);
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            await showSpeak();
+            speakEl = document.getElementById("speak");
+            typer = new Typewriter(speakEl, { onChange: onTick });
+          }
+          replyAcc += obj.content;
+          typer.feed(obj.content);
+        } else if (obj.event === "error") {
+          throw new Error(obj.message || "model error");
+        }
+      }
+    }
+
+    if (typer) await typer.drain();
+    history.push({ role: "assistant", content: replyAcc });
+    if (speakEl) speakEl.classList.remove("streaming");
+
+    // ── New: keep the bubble alive for follow-up turns. After a tiny
+    // dwell so the streaming animation settles, swap the speak content
+    // back to an ask box so the user can type the next message without
+    // having to re-click the pet. If no follow-up arrives within the
+    // inactivity window, the bubble fades quietly.
+    const readingMs = 1500;
+    const lastReply = replyAcc;
+    fadeTimer = setTimeout(async () => {
+      fadeTimer = null;
+      // Re-render with the previous reply pinned dimly above a fresh input.
+      await showAsk(lastReply);
+      // Auto-fade if user idles in ask phase for ~25s.
+      fadeTimer = setTimeout(() => {
+        fadeTimer = null;
+        if (phase === "ask" && (!inputEl || !inputEl.value.trim())) {
+          hideBubble({ fade: true });
+        }
+      }, 25000);
+    }, readingMs);
+  } catch (err) {
+    if (typer) typer.stop();
+    if (err.name === "AbortError") return;
+    await showError(err.message || String(err));
+    setTimeout(() => hideBubble({ fade: true }), 4000);
+  }
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// ── Typewriter: paint chars at a steady, focused pace ────────────────────
+// The model can produce tokens in bursty chunks (a Chinese word at a time).
+// The typewriter buffers them and reveals chars one-by-one at ~16ms/char,
+// catching up faster when the backlog grows so we never fall too far behind.
+class Typewriter {
+  constructor(target, { tickMs = 16, onChange = () => {} } = {}) {
+    this.target = target;
+    this.tickMs = tickMs;
+    this.buf = "";
+    this.timer = null;
+    this.onChange = onChange;
+    this._doneResolvers = [];
+  }
+  feed(text) {
+    if (!text) return;
+    this.buf += text;
+    if (!this.timer) this._start();
+  }
+  _start() {
+    this.timer = setInterval(() => {
+      if (!this.buf.length) {
+        clearInterval(this.timer);
+        this.timer = null;
+        const rs = this._doneResolvers.slice();
+        this._doneResolvers.length = 0;
+        rs.forEach((r) => r());
+        return;
+      }
+      // Adaptive: catch up faster when backlog grows. ~60 char/s nominal,
+      // up to ~250 char/s when buffer is huge. Feels like an attentive
+      // typist rather than a print queue.
+      const n = this.buf.length > 120 ? 4
+              : this.buf.length > 40  ? 2
+              : 1;
+      const chunk = this.buf.slice(0, n);
+      this.buf = this.buf.slice(n);
+      this.target.textContent += chunk;
+      this.onChange();
+    }, this.tickMs);
+  }
+  // Wait for the buffer to fully drain (used before transitioning think→speak).
+  drain() {
+    return new Promise((resolve) => {
+      if (!this.buf.length && !this.timer) { resolve(); return; }
+      this._doneResolvers.push(resolve);
+    });
+  }
+  stop() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.buf = "";
+    this._doneResolvers = [];
+  }
+  reset(target) {
+    this.stop();
+    if (target) this.target = target;
+    this.target.textContent = "";
+  }
+}
+
+// ── public commands invoked from main process ──
+async function cmdOpen({ side } = {}) {
+  if (side) setSide(side);
+  // If we were waiting / generating, dismiss it so the user can type.
+  if (abortCtrl) {
+    try { abortCtrl.abort(); } catch {}
+    abortCtrl = null;
+  }
+  if (!await ensureBooted()) return;
+  await showAsk();
+}
+
+async function cmdDismiss() {
+  if (abortCtrl) {
+    try { abortCtrl.abort(); } catch {}
+    abortCtrl = null;
+  }
+  await hideBubble({ fade: true });
+}
+
+async function cmdReset() {
+  history = [];
+  if (phase === "ask" && inputEl) inputEl.value = "";
+}
+
+function cmdToggleThinking() {
+  settings.thinking = !settings.thinking;
+  return settings.thinking;
+}
+
+async function dismiss() { await cmdDismiss(); }
+
+let toastTimer = null;
+async function showToast(text) {
+  if (toastTimer) clearTimeout(toastTimer);
+  const prevPhase = phase;
+  const prevHTML = content.innerHTML;
+  content.innerHTML = `<div style="text-align:center;color:var(--muted);font-size:12px;padding:2px 0;">${escapeHtml(text)}</div>`;
+  await measureAndShow();
+  toastTimer = setTimeout(async () => {
+    toastTimer = null;
+    if (prevPhase === "ask") {
+      await showAsk();
+    } else if (prevPhase === "hidden" || prevPhase === "starting") {
+      await hideBubble({ fade: true });
+    } else {
+      content.innerHTML = prevHTML;
+      await measureAndShow({ animate: false });
+    }
+  }, 1200);
+}
+
+if (window.minicpm) {
+  if (window.minicpm.onOpen) window.minicpm.onOpen(cmdOpen);
+  if (window.minicpm.onDismiss) window.minicpm.onDismiss(cmdDismiss);
+  if (window.minicpm.onReset) window.minicpm.onReset(cmdReset);
+  if (window.minicpm.onToggleThinking) window.minicpm.onToggleThinking(async () => {
+    // When a persona LoRA is loaded, thinking-mode is broken (the model
+    // doesn't emit </think>). Warn instead of letting the user flip it on
+    // and stare at an empty bubble.
+    let persona = "default";
+    try {
+      const r = await fetch(sidecarUrl + "/api/health");
+      const d = await r.json();
+      persona = d.persona || "default";
+    } catch {}
+    const willEnable = !settings.thinking;
+    if (willEnable && persona !== "default") {
+      showToast(`当前 ${persona} 人格不支持思考模式，先切到原版再开`);
+      return;
+    }
+    settings.thinking = !settings.thinking;
+    showToast(`思考已${settings.thinking ? "开启" : "关闭"}`);
+  });
+  if (window.minicpm.onUpdateStatus) window.minicpm.onUpdateStatus(updateBadge);
+  if (window.minicpm.onUpdateApplying) window.minicpm.onUpdateApplying(showUpdateProgress);
+  if (window.minicpm.onNarrate) window.minicpm.onNarrate(showNarration);
+  // Out-of-band system messages (e.g. "已切换到 X" pushed from the
+  // Settings panel after an adapter swap). Routed to the same
+  // showCommandReply path the in-chat commands use, with optional
+  // history wipe so the new persona starts clean.
+  if (window.minicpm.onCmdReply) window.minicpm.onCmdReply(async (cmd) => {
+    if (!cmd || !cmd.text) return;
+    if (cmd.resetHistory) history = [];
+    await showCommandReply(cmd);
+  });
+  // Drag-to-position: turn the whole window into a draggable handle
+  // and render a sample bubble so the user has something to grab.
+  if (window.minicpm.onEditMode) window.minicpm.onEditMode(async (payload) => {
+    if (payload && payload.enabled) {
+      enterEditMode();
+    } else {
+      exitEditMode();
+    }
+  });
+}
+
+// ── Drag-to-position edit mode ─────────────────────────────────────────
+// Toggled by the Settings panel via ipcMain → renderer. While on, the
+// whole bubble window is OS-draggable (CSS region: drag) and shows a
+// fixed sample. Settings captures bubble.getBounds() on save and turns
+// that into a (dx, dy) offset relative to the pet hit rect.
+async function enterEditMode() {
+  if (abortCtrl) { try { abortCtrl.abort(); } catch {} abortCtrl = null; }
+  clearFade();
+  phase = "narration";
+  // Apply drag region to body and the bubble shell.
+  document.body.classList.add("edit-mode");
+  content.innerHTML = `
+    <div style="display:flex; gap:6px; align-items:flex-start;">
+      <span style="font-size:14px; line-height:1; color:var(--accent); padding-top:1px;">📍</span>
+      <span style="font-size:13px; color:var(--text); white-space:pre-wrap;">把我拖到喜欢的位置 🐾\n然后回到设置点「保存」</span>
+    </div>`;
+  await measureAndShow({ animate: true, width: naturalDisplayWidth("把我拖到喜欢的位置 🐾", { min: 240, padding: 56 }) });
+}
+
+function exitEditMode() {
+  document.body.classList.remove("edit-mode");
+  // The main proc hides the window for us; just reset internal phase
+  // so the next open starts clean.
+  clearFade();
+  phase = "hidden";
+}
+
+// ── Narration: ambient one-line reaction to coding-agent events ────────
+async function showNarration({ text, kind }) {
+  if (!text) return;
+  if (phase === "speak" || phase === "think-stream") return;
+  if (abortCtrl) { try { abortCtrl.abort(); } catch {} abortCtrl = null; }
+
+  clearFade();
+  phase = "narration";
+  const escaped = escapeHtml(text);
+  const accent = kind === "StopFailure" ? "#ff6b6b" : "var(--accent)";
+  content.innerHTML = `
+    <div style="display:flex; gap:6px; align-items:flex-start;">
+      <span style="font-size:13px; line-height:1; color:${accent}; padding-top:1px;">🐾</span>
+      <span style="font-size:13px; color:var(--text); white-space:pre-wrap; word-wrap:break-word;">${escaped}</span>
+    </div>`;
+  await measureAndShow({ animate: true, width: naturalDisplayWidth(text, { min: 220, padding: 56 }) });
+}
+
+// ── Updater UI ────────────────────────────────────────────────────────────
+const updPill = document.getElementById("updPill");
+updPill.addEventListener("click", async () => {
+  // Switch to "applying" mode immediately, then start the SSE flow.
+  showUpdateProgress({ phase: "start" });
+  if (window.minicpm && window.minicpm.updateApply) {
+    await window.minicpm.updateApply();
+  }
+  // updateBadge will fire via onUpdateStatus after refresh
+  await refreshUpdateBadge();
+});
+
+async function refreshUpdateBadge() {
+  if (window.minicpm && window.minicpm.updateStatus) {
+    const s = await window.minicpm.updateStatus();
+    updateBadge(s);
+  }
+}
+
+function updateBadge(status) {
+  if (!status || !status.available) {
+    updPill.style.display = "none";
+    return;
+  }
+  updPill.textContent = `新版本 ${status.remote_revision}`;
+  updPill.style.display = "inline-flex";
+}
+
+let updProgressEl = null;
+function showUpdateProgress(ev) {
+  // Render a focused "downloading" view that takes over the bubble until done.
+  if (ev.phase === "start" || !updProgressEl) {
+    phase = "speak"; // borrow speak phase so toast/transitions don't fire
+    content.innerHTML = `
+      <div class="upd-progress">
+        <div id="upd-text">准备下载新模型…</div>
+        <div class="bar"><i id="upd-bar"></i></div>
+      </div>`;
+    measureAndShow({ width: 280 });
+    updProgressEl = {
+      text: document.getElementById("upd-text"),
+      bar: document.getElementById("upd-bar"),
+    };
+  }
+  if (!updProgressEl) return;
+
+  if (ev.phase === "transfer" && ev.bytes_total > 0) {
+    const pct = Math.min(100, (ev.bytes_done / ev.bytes_total) * 100);
+    updProgressEl.bar.style.width = pct.toFixed(1) + "%";
+    const mb = (n) => (n / (1024 * 1024)).toFixed(1);
+    updProgressEl.text.textContent = `下载中: ${mb(ev.bytes_done)} / ${mb(ev.bytes_total)} MB`;
+  } else if (ev.phase === "swap") {
+    updProgressEl.text.textContent = "替换文件…";
+  } else if (ev.phase === "complete") {
+    updProgressEl.bar.style.width = "100%";
+    updProgressEl.text.textContent = "应用完成，重新加载模型…";
+  } else if (ev.phase === "reloaded") {
+    updProgressEl.text.textContent = "✓ 模型已更新";
+    setTimeout(() => {
+      updProgressEl = null;
+      hideBubble({ fade: true });
+      refreshUpdateBadge();
+    }, 1500);
+  } else if (ev.phase === "error" || ev.phase === "reload-error") {
+    updProgressEl.text.textContent = "更新失败: " + (ev.message || "未知错误");
+    setTimeout(() => {
+      updProgressEl = null;
+      hideBubble({ fade: true });
+    }, 4000);
+  }
+}
+
+// Initial check on first load (will also fire when main pushes status).
+refreshUpdateBadge();
+
+// First-render: attempt to open right away (the main process opens us
+// after creating the window, but we also handle the case where we're
+// loaded standalone).
+cmdOpen({});
+</script>
+</body>
+</html>
