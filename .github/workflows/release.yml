@@ -125,7 +125,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y cmake build-essential \
-            libvulkan-dev glslang-tools glslc spirv-headers spirv-tools
+            libvulkan-dev glslang-tools spirv-headers spirv-tools
 
       - name: Install uv
         run: |
@@ -176,6 +176,12 @@ jobs:
         with:
           version: 1.4.309.0
           cache: true
+
+      - name: Install SPIRV-Headers via vcpkg
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install spirv-headers:x64-windows
+          Add-Content $env:GITHUB_ENV "VCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
 
       - name: Install uv
         run: |

@@ -36,6 +36,13 @@ switch ($accel) {
   default  { Write-Error "Unknown LLAMA_ACCEL=$accel (expected vulkan|cuda|cpu)" }
 }
 
+# Vulkan 后端需要 SPIRV-Headers 的 CMake config。LunarG 精简 SDK 不带，
+# CI 通过 vcpkg 装并在 VCPKG_INSTALLED_DIR 下提供 cmake config。
+if ($accel -eq "vulkan" -and $env:VCPKG_INSTALLED_DIR) {
+  Write-Host "==> Using vcpkg prefix: $env:VCPKG_INSTALLED_DIR" -ForegroundColor Cyan
+  $flags += "-DCMAKE_PREFIX_PATH=$env:VCPKG_INSTALLED_DIR"
+}
+
 Write-Host "==> Target: $target   Accel: $accel" -ForegroundColor Cyan
 Write-Host "==> Source: $src"      -ForegroundColor Cyan
 
@@ -50,8 +57,10 @@ $jobs = if ($env:LLAMA_JOBS) { $env:LLAMA_JOBS } else {
 Write-Host "==> cmake build (-j$jobs)" -ForegroundColor Cyan
 
 New-Item -ItemType Directory -Force -Path $build | Out-Null
-& cmake -S $src -B $build @flags
+& cmake -S $src -B $build -DCMAKE_BUILD_TYPE=Release @flags
+if ($LASTEXITCODE -ne 0) { Write-Error "cmake configure failed (exit $LASTEXITCODE)" }
 & cmake --build $build --target llama-server --config Release -j $jobs
+if ($LASTEXITCODE -ne 0) { Write-Error "cmake build failed (exit $LASTEXITCODE)" }
 
 $server = $null
 foreach ($cand in @(
