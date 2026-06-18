@@ -69,7 +69,16 @@ try {
   }
 
   Write-Host "==> OK -> $outServer" -ForegroundColor Green
-  & $outServer --version
+  # Only run --version when the binary matches the host architecture;
+  # cross-arch binaries (e.g. arm64 on an x64 runner) can't execute.
+  $hostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLower()
+  $targetIsArm = $Target -match "arm64"
+  $hostIsArm = $hostArch -eq "arm64"
+  if ($targetIsArm -eq $hostIsArm) {
+    & $outServer --version
+  } else {
+    Write-Host "  (skipping --version: $Target binary on $hostArch host)" -ForegroundColor Yellow
+  }
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
