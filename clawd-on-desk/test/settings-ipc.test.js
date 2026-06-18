@@ -669,11 +669,13 @@ test("settings IPC serves agent/about/update/external and remove-theme dialog he
     ]);
     assert.deepStrictEqual(await ipcMain.invoke("settings:get-about-info"), {
       version: "1.2.3",
+      appName: "MiniCPM Desk Pet",
       repoUrl: "https://github.com/OpenBMB/MiniCPM-Desk-Pet",
+      modelRepoUrl: "https://huggingface.co/openbmb/MiniCPM5-1B-GGUF",
       license: "AGPL-3.0-only",
       copyright: "\u00a9 2026 OpenBMB",
-      authorName: "OpenBMB",
-      authorUrl: "https://github.com/OpenBMB",
+      upstreamRepoUrl: "https://github.com/rullerzhou-afk/clawd-on-desk",
+      upstreamLabel: "clawd-on-desk",
       heroSvgContent: "<svg id=\"hero\"></svg>",
       pendingUpdateVersion: "",
       autoUpdateCheck: true,

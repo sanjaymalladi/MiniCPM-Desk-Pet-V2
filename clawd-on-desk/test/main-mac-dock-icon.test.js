@@ -118,29 +118,24 @@ test("macOS runtime dock icon override respects hidden Dock preference", () => {
   );
 });
 
-test("dock icon is padded to the macOS grid, not full-bleed (issue #416 Part B)", () => {
+test("dock icon is full-bleed for macOS Tahoe tiling", () => {
   const { canvas, width, height } = alphaContentBBox(DOCK_ICON);
   assert.equal(canvas, 1024, "dock icon canvas should be 1024px");
-  // Apple grid target is 824/1024 = 80.5%. Guard against a full-bleed regression
-  // (content === canvas) while leaving room to retune the exact padding.
+  // MiniCPM uses full-bleed square icons so macOS Tahoe tiles them correctly.
   assert.ok(
-    width < 900 && height < 900,
-    `dock icon content (${width}x${height}) must be padded, not full-bleed`
-  );
-  assert.ok(
-    width >= 780 && height >= 780,
-    `dock icon content (${width}x${height}) should not be shrunk too far`
+    width >= 900 && height >= 900,
+    `dock icon content (${width}x${height}) should be full-bleed (>= 900px)`
   );
 });
 
-test("MiniCPM app icons keep transparent rounded macOS corners", () => {
+test("MiniCPM app icons use full-bleed opaque corners for macOS Tahoe", () => {
   for (const file of [APP_ICON, DOCK_ICON]) {
     const { canvas } = alphaContentBBox(file);
     const last = canvas - 1;
-    assert.equal(alphaAt(file, 0, 0), 0, `${file} top-left corner should be transparent`);
-    assert.equal(alphaAt(file, last, 0), 0, `${file} top-right corner should be transparent`);
-    assert.equal(alphaAt(file, 0, last), 0, `${file} bottom-left corner should be transparent`);
-    assert.equal(alphaAt(file, last, last), 0, `${file} bottom-right corner should be transparent`);
+    assert.ok(alphaAt(file, 0, 0) > 0, `${file} top-left corner should be opaque (full-bleed)`);
+    assert.ok(alphaAt(file, last, 0) > 0, `${file} top-right corner should be opaque (full-bleed)`);
+    assert.ok(alphaAt(file, 0, last) > 0, `${file} bottom-left corner should be opaque (full-bleed)`);
+    assert.ok(alphaAt(file, last, last) > 0, `${file} bottom-right corner should be opaque (full-bleed)`);
   }
 });
 
