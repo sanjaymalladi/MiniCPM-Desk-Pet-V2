@@ -94,6 +94,9 @@ bin/cc-connect-clawd/*/cc-connect-clawd.exe
 !bin/cc-connect-clawd/
 !bin/cc-connect-clawd/README.md
 
+# VC++ Redistributable (downloaded in CI only)
+build/vc_redist.arm64.exe
+
 # GIF recording tools (not part of main project)
 scripts/*
 !scripts/remote-deploy.sh

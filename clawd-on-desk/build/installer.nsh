@@ -4,6 +4,14 @@
   FileOpen $0 "$INSTDIR\.clawd-install-user-home" w
   FileWrite $0 "$PROFILE"
   FileClose $0
+
+  ; Install ARM64 VC++ Runtime if missing (needed by native llama-server)
+  !if /FileExists "${BUILD_RESOURCES_DIR}\vc_redist.arm64.exe"
+    IfFileExists "$SYSDIR\vcruntime140.dll" vcrt_done 0
+      File /oname=$PLUGINSDIR\vc_redist.arm64.exe "${BUILD_RESOURCES_DIR}\vc_redist.arm64.exe"
+      ExecWait '"$PLUGINSDIR\vc_redist.arm64.exe" /install /quiet /norestart'
+    vcrt_done:
+  !endif
 !macroend
 
 !macro customUnInstall
