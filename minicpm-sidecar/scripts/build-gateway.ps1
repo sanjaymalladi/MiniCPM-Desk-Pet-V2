@@ -1,7 +1,11 @@
 # Build the gateway into a single-file PyInstaller binary on Windows.
 #
+# Usage:
+#   .\build-gateway.ps1                    # default: win-x64
+#   .\build-gateway.ps1 -Target win-arm64  # ARM64
+#
 # Output:
-#   bin\win-x64\minicpm-sidecar.exe
+#   bin\<Target>\minicpm-sidecar.exe
 
 param(
   [string] $Target = "win-x64"

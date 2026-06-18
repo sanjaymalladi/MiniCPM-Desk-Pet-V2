@@ -146,7 +146,7 @@ def _platform_triple() -> str:
     if sys_name == "Linux":
         return "linux-arm64" if machine in ("aarch64", "arm64") else "linux-x64"
     if sys_name == "Windows":
-        return "win-x64"
+        return "win-arm64" if machine in ("arm64", "aarch64") else "win-x64"
     return f"{sys_name.lower()}-{machine}"
 
 
