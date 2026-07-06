@@ -605,6 +605,7 @@ function createElicitationQuestionCard(question, questionIndex) {
     if (updateSubmitState) updateElicitationSubmitState();
     scheduleBubbleHeightReport();
     if (selected) {
+      window.bubbleAPI.requestFocus();
       requestAnimationFrame(() => otherTextarea.focus());
     }
   };
@@ -972,6 +973,7 @@ function enterPlanFeedbackMode(lang) {
   planFeedbackForm.classList.add("visible");
   scheduleBubbleHeightReport();
   // Focus textarea after DOM settles (web-level focus, not window focus)
+  window.bubbleAPI.requestFocus();
   requestAnimationFrame(() => planFeedbackTextarea.focus());
 }
 

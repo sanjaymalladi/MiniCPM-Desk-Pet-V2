@@ -62,6 +62,7 @@ test("permission IPC registers owned channels, delegates, and disposes", () => {
 
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
     "bubble-height",
+    "bubble-request-focus",
     "permission-decide",
   ]);
 
