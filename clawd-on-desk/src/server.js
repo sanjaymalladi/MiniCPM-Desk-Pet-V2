@@ -45,6 +45,7 @@ const {
   buildToolInputFingerprint,
   findPendingPermissionForStateEvent,
 } = require("./server-permission-utils");
+const { handleFocusPost } = require("./server-route-focus");
 
 module.exports = function initServer(ctx) {
 
@@ -258,6 +259,12 @@ function startHttpServer() {
         ctx,
         createRequestHookRecorder,
       });
+    } else if (req.method === "POST" && req.url === "/focus") {
+      // Attention Companion: receives NormalizedEvent from OS focus hook + browser extension
+      handleFocusPost(req, res, { ctx, nowFn });
+    } else if (req.method === "POST" && req.url === "/attention-signal") {
+      // Attention Companion: agent hook signals (stuck-detection, commit/PR completion)
+      handleAttentionSignalPost(req, res);
     } else {
       res.writeHead(404);
       res.end();
@@ -302,6 +309,33 @@ function cleanup() {
   clearClaudeHookGuardStatus();
   stopClaudeSettingsWatcher();
   if (httpServer) httpServer.close();
+}
+
+function handleAttentionSignalPost(req, res) {
+  let raw = "";
+  req.on("data", (c) => {
+    raw += c;
+    if (raw.length > 1e4) req.destroy();
+  });
+  req.on("end", () => {
+    let body;
+    try { body = JSON.parse(raw); } catch { res.writeHead(400); res.end(); return; }
+    const decision = global.__attentionDecision;
+    if (!decision) { res.writeHead(503); res.end(); return; }
+    const kind = body && body.kind;
+    try {
+      if (kind === "query") decision.recordAgentActivity({ type: "query", tool: body.tool, question: body.question });
+      else if (kind === "doc") decision.recordAgentActivity({ type: "doc", docId: body.docId });
+      else if (kind === "write") decision.recordAgentActivity({ type: "write", path: body.path });
+      else if (kind === "commit") decision.recordAgentActivity({ type: "commit" });
+      else if (kind === "pr") decision.recordTaskCompletion("pr");
+      else { res.writeHead(400); res.end(); return; }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      res.writeHead(500); res.end();
+    }
+  });
 }
 
 return {

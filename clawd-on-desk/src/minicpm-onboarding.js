@@ -22,13 +22,14 @@
 // pet window and warms the sidecar in the background.
 //
 
-const { BrowserWindow, ipcMain, dialog, app } = require("electron");
+const { BrowserWindow, ipcMain, dialog, app, shell } = require("electron");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const os = require("os");
 const minicpmI18n = require("./minicpm-i18n");
-const { downloadMiniCpmModel } = require("./minicpm-model-download");
+const { downloadMiniCpmModel, downloadVisionModels } = require("./minicpm-model-download");
+const { BrowserScan } = require("./attention-browser-scan");
 
 const isMac = process.platform === "darwin";
 const SENTINEL_FILE = "minicpm-onboarding.json";
@@ -421,6 +422,65 @@ module.exports = function initOnboarding(ctx) {
       }
     },
 
+    // Plan §2 step 4 — download the MiniCPM-V 4.6 vision model (GGUF Q4_K_M +
+    // F16 mmproj) so the last-resort vision classifier can run. Lands in the
+    // same models dir as the text model; the vision sidecar resolves it from
+    // there. Optional — the wizard lets the user skip and enable vision later.
+    "onboarding:start-vision-model-download": async () => {
+      const chat = ctx.getChat();
+      const destinationDir = chat && chat.getDefaultModelDir ? chat.getDefaultModelDir() : userDataPath("models");
+      progress("start", { phase: "vision-download" });
+      try {
+        const results = await downloadVisionModels({
+          destinationDir,
+          onProgress: (ev) => progress("vision-download", ev),
+        });
+        const ok = results.every((r) => r && r.ok);
+        progress("done", { phase: "vision-download", ok, results });
+        return { ok, results };
+      } catch (err) {
+        const msg = String(err && err.message || err);
+        progress("error", { phase: "vision-download", message: msg });
+        return { ok: false, error: msg };
+      }
+    },
+
+    // Plan §3.1 — per-browser tab-tracking extension scan. Onboarding calls
+    // this with the OS-detected browser app ids and renders one install prompt
+    // per browser (not once). Returns the per-browser install plan.
+    "onboarding:detect-browsers": async () => {
+      try {
+        const detected = (typeof ctx.detectInstalledBrowsers === "function")
+          ? ctx.detectInstalledBrowsers()
+          : [];
+        const scan = new BrowserScan();
+        const installed = scan.detectInstalled(detected);
+        const plan = scan.buildInstallPlan(installed);
+        return { ok: true, detected, plan };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err), plan: [] };
+      }
+    },
+
+    // Plan §3.1 — reveal the matching tab-tracking extension folder so the
+    // user can load it unpacked. Chromium-family browsers share the MV3 build;
+    // Firefox uses the MV2 build. Unsupported browsers return unsupported:true.
+    "onboarding:open-extension-folder": async (_evt, { browserId } = {}) => {
+      const id = String(browserId || "").toLowerCase();
+      const chromium = ["chrome", "edge", "brave", "opera", "arc", "vivaldi", "chromium"];
+      let folder = null;
+      if (chromium.includes(id)) folder = "focus-bridge-chrome";
+      else if (id === "firefox") folder = "focus-bridge-firefox";
+      if (!folder) return { ok: false, unsupported: true };
+      const dir = path.join(__dirname, "..", "extensions", folder);
+      try {
+        await shell.openPath(dir);
+        return { ok: true, dir };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    },
+
     "onboarding:warmup": async () => {
       // Sidecar may need to load weights for the first time — give it
       // generous timeout (matches Sidecar._spawnAndWait deadline).
@@ -441,11 +501,31 @@ module.exports = function initOnboarding(ctx) {
       }
     },
 
-    "onboarding:complete": async () => {
+    "onboarding:complete": async (_evt, payload = {}) => {
+      // Persist the consent choices the user made on the extensions step
+      // (plan §2 consent): vision/screenshot + OS accessibility. These are
+      // written through the settings controller (sole writer) and also
+      // recorded in the sentinel for first-launch diagnostics.
+      const consents = {
+        visionConsent: !!(payload && payload.visionConsent),
+        accessibilityConsent: !!(payload && payload.accessibilityConsent),
+      };
+      try {
+        if (ctx.settingsController && typeof ctx.settingsController.applyUpdate === "function") {
+          ctx.settingsController.applyUpdate("attentionVisionConsent", consents.visionConsent);
+          ctx.settingsController.applyUpdate("attentionAccessibilityConsent", consents.accessibilityConsent);
+        }
+      } catch (err) {
+        log(`[onboarding] consent persist failed: ${err && err.message}`);
+      }
       // device is intentionally pinned to "auto" since v0.8.1 — the
       // wizard no longer exposes accelerator selection. The Settings
       // tab can still override later via MINICPM_DEVICE.
-      writeSentinel({ device: "auto" });
+      writeSentinel({
+        device: "auto",
+        visionConsent: consents.visionConsent,
+        accessibilityConsent: consents.accessibilityConsent,
+      });
       try { ctx.onComplete && ctx.onComplete(); } catch (err) {
         log(`[onboarding] onComplete callback failed: ${err && err.message}`);
       }

@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   getPreviewSoundUrl: () => ipcRenderer.invoke("settings:get-preview-sound-url"),
   command: (action, payload) => ipcRenderer.invoke("settings:command", { action, payload }),
   openDashboard: () => ipcRenderer.send("settings:open-dashboard"),
+  openMemoryDashboard: () => ipcRenderer.send("memory-dashboard:open"),
   listAgents: () => ipcRenderer.invoke("settings:list-agents"),
   detectAgentInstallations: () => ipcRenderer.invoke("settings:detect-agent-installations"),
   getAboutInfo: () => ipcRenderer.invoke("settings:get-about-info"),
@@ -182,6 +183,9 @@ contextBridge.exposeInMainWorld("minicpmSettings", {
   uploadAdapter: (payload) => ipcRenderer.invoke("minicpm-settings:upload-adapter", payload || {}),
   renameAdapter: (payload) => ipcRenderer.invoke("minicpm-settings:rename-adapter", payload || {}),
   removeAdapter: (payload) => ipcRenderer.invoke("minicpm-settings:remove-adapter", payload || {}),
+  startVisionModelDownload: () => ipcRenderer.invoke("minicpm-settings:start-vision-model-download"),
+  detectBrowsers: () => ipcRenderer.invoke("minicpm-settings:detect-browsers"),
+  openExtensionFolder: (browserId) => ipcRenderer.invoke("minicpm-settings:open-extension-folder", { browserId }),
 });
 
 contextBridge.exposeInMainWorld("doctor", {

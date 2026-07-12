@@ -14,8 +14,11 @@ contextBridge.exposeInMainWorld("onboarding", {
   selectDevice: (device) => ipcRenderer.invoke("onboarding:select-device", { device }),
   pickLocalModel: () => ipcRenderer.invoke("onboarding:pick-local-model"),
   startModelDownload: () => ipcRenderer.invoke("onboarding:start-model-download"),
+  startVisionModelDownload: () => ipcRenderer.invoke("onboarding:start-vision-model-download"),
+  detectBrowsers: () => ipcRenderer.invoke("onboarding:detect-browsers"),
+  openExtensionFolder: (browserId) => ipcRenderer.invoke("onboarding:open-extension-folder", { browserId }),
   warmup: () => ipcRenderer.invoke("onboarding:warmup"),
-  complete: () => ipcRenderer.invoke("onboarding:complete"),
+  complete: (payload) => ipcRenderer.invoke("onboarding:complete", payload || {}),
   // Used when the user switches between online download and local file
   // after one source already loaded — restarts the sidecar so warmup
   // picks up the new model file.

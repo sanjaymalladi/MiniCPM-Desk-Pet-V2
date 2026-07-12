@@ -832,6 +832,22 @@ async function submit(text) {
 
   history.push({ role: "user", content: text });
 
+  // v3 RAG: retrieve relevant memories for this turn and prepend as context.
+  // `memoryContext` stays "" when the backend is off or nothing is relevant,
+  // so we never waste KV budget on an empty block.
+  let memoryContext = "";
+  try {
+    if (window.minicpm && typeof window.minicpm.memorySearch === "function") {
+      const rag = await window.minicpm.memorySearch(text);
+      const augment = window.ClawdMinicpmMemoryAugment;
+      if (rag && rag.memories && rag.memories.length && augment) {
+        memoryContext = augment.buildMemoryContextText(rag.memories, { maxChars: 1200 });
+      }
+    }
+  } catch (err) {
+    console.warn("[minicpm-chat] rag retrieve failed:", err && err.message);
+  }
+
   // Tell the sidecar: start generating. The sidecar pushes pet states
   // (thinking → working → attention) to clawd-on-desk over HTTP, so the
   // pet animates while we wait.
@@ -887,97 +903,228 @@ async function submit(text) {
     }
   }
 
-  try {
-    const resp = await fetch(sidecarUrl + "/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages: messagesToSend,
-        stream: true,
-        max_new_tokens: maxNewTokens,
-        temperature: (typeof chatParams.temperature === "number") ? chatParams.temperature : 0.6,
-        top_p: (typeof chatParams.top_p === "number") ? chatParams.top_p : 0.95,
-        top_k: (typeof chatParams.top_k === "number") ? chatParams.top_k : 0,
-        repetition_penalty: (typeof chatParams.repetition_penalty === "number") ? chatParams.repetition_penalty : 1.05,
-        thinking: effectiveThinking,
-      }),
-      signal: abortCtrl.signal,
+  // Prepend the Tool Calling instruction
+  const toolPrompt = `You are a helpful desk pet assistant.
+You have access to these tools:
+ - [get_browser_state] to see what the user is watching/doing on screen
+ - [search_memory: your query] to look up what you remember about the user or the world (alias: [memory_search: query])
+ - [memory_remember: a fact] to save something the user told you to remember
+ - [get_transcript] to fetch the transcript of the video currently playing (or the last one you watched)
+ - [goal_countdown] to check how much time is left on the user's current goal
+ - [list_sessions] to see which coding-agent sessions are active right now
+ - [launch_jupyter] to start JupyterLab and open a notebook for the user
+
+Follow these exact examples — when a request matches a tool, answer with ONLY the bracket, no extra words:
+User: "What am I watching right now?"
+Assistant: [get_browser_state]
+User: "What is on my screen?"
+Assistant: [get_browser_state]
+User: "Get me the transcript for the current video"
+Assistant: [get_transcript]
+User: "What is being said in the video?"
+Assistant: [get_transcript]
+User: "How much time is left on my goal?"
+Assistant: [goal_countdown]
+User: "Which coding sessions are active?"
+Assistant: [list_sessions]
+User: "Open a Jupyter notebook"
+Assistant: [launch_jupyter]
+User: "Remember that I use Vim"
+Assistant: [memory_remember: user prefers Vim]
+User: "What do you know about local LLMs?"
+Assistant: [search_memory: local LLM inference]
+User: "What is 2+2?"
+Assistant: 2+2 is 4.
+User: "Write a python script."
+Assistant: Here is the script...
+
+RULES:
+- If the user asks for a transcript, what is said in a video, or captions of what they are watching, output [get_transcript] and NOTHING ELSE.
+- If the user asks how much time remains on a goal or a countdown, output [goal_countdown] and NOTHING ELSE.
+- If the user asks which agents/sessions/terminals are running, output [list_sessions] and NOTHING ELSE.
+- If the user asks to open Jupyter or a notebook, output [launch_jupyter] and NOTHING ELSE.
+- If the user asks about their screen or what they are watching/doing, output [get_browser_state] and NOTHING ELSE.
+- To save a memory, output [memory_remember: the fact]. To look something up, output [search_memory: the query].
+- Do NOT write "I don't know how to" when a tool exists for the request. ALWAYS prefer the matching bracket.`;
+
+  // Compose the message list: tool prompt (always leads) → memory context
+  // (if any) → trimmed conversation history. Uses the v3 augment helper so
+  // the ordering/trim is consistent with the unit tests.
+  const augment = window.ClawdMinicpmMemoryAugment;
+  let finalMessages;
+  if (augment && typeof augment.buildAugmentedMessages === "function") {
+    finalMessages = augment.buildAugmentedMessages({
+      messages: messagesToSend,
+      toolPrompt,
+      memoryContext,
     });
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
+  } else {
+    finalMessages = [
+      { role: "system", content: toolPrompt },
+      ...(memoryContext ? [{ role: "system", content: memoryContext }] : []),
+      ...messagesToSend,
+    ];
+  }
 
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
+  let loopFetch = true;
+  try {
+    while (loopFetch) {
+      loopFetch = false;
+      const resp = await fetch(sidecarUrl + "/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: finalMessages,
+          stream: true,
+          max_new_tokens: maxNewTokens,
+          temperature: (typeof chatParams.temperature === "number") ? chatParams.temperature : 0.6,
+          top_p: (typeof chatParams.top_p === "number") ? chatParams.top_p : 0.95,
+          top_k: (typeof chatParams.top_k === "number") ? chatParams.top_k : 0,
+          repetition_penalty: (typeof chatParams.repetition_penalty === "number") ? chatParams.repetition_penalty : 1.05,
+          thinking: effectiveThinking,
+        }),
+        signal: abortCtrl.signal,
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const block = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        if (!block.startsWith("data:")) continue;
-        const payload = block.slice(5).trim();
-        if (!payload) continue;
-        let obj;
-        try { obj = JSON.parse(payload); } catch { continue; }
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
 
-        if (obj.event === "think" && effectiveThinking) {
-          if (!sawThink) {
-            sawThink = true;
-            await showThink();
-            thinkEl = document.getElementById("think-text");
-            typer = new Typewriter(thinkEl, { onChange: onTick });
-          }
-          thinkAcc += obj.content;
-          typer.feed(obj.content);
-        } else if (obj.event === "delta") {
-          // First reply chunk → drain whatever's left in the thought
-          // typewriter, then transition to a fresh reply bubble.
-          if (!sawReply) {
-            sawReply = true;
-            if (typer) await typer.drain();
-            if (sawThink && phase === "think-stream") {
-              await fadeOutAndHide(220);
-              await new Promise((r) => setTimeout(r, 100));
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!block.startsWith("data:")) continue;
+          const payload = block.slice(5).trim();
+          if (!payload) continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch { continue; }
+
+          if (obj.event === "think" && effectiveThinking) {
+            if (!sawThink) {
+              sawThink = true;
+              await showThink();
+              thinkEl = document.getElementById("think-text");
+              typer = new Typewriter(thinkEl, { onChange: onTick });
             }
-            await showSpeak();
-            speakEl = document.getElementById("speak");
-            typer = new Typewriter(speakEl, { onChange: onTick });
+            thinkAcc += obj.content;
+            typer.feed(obj.content);
+          } else if (obj.event === "delta") {
+            replyAcc += obj.content;
+
+            // Check for XML or Bracketed Tool Call
+            const isXml = replyAcc.includes("<tool_call>");
+            const bracketMatch = replyAcc.match(/\[\s*([a-z_ ]+?)\s*(?::\s*([^\]]*?))?\s*\]/i);
+            // Normalize the captured name (lowercase, spaces→underscores) and
+            // only treat it as a tool if it matches a known tool, so the model
+            // can emit [Get Transcript], [get transcript], etc.
+            const KNOWN_TOOLS = ["search_memory","memory_search","memory_remember","get_browser_state","get_transcript","goal_countdown","list_sessions","launch_jupyter"];
+            let isBracket = false;
+            let normTool = null;
+            if (bracketMatch) {
+              const raw = bracketMatch[1].toLowerCase().replace(/\s+/g, "_");
+              if (KNOWN_TOOLS.includes(raw)) { isBracket = true; normTool = raw; }
+            }
+
+            if (isXml || isBracket) {
+              // For XML tool calls, wait until the closing tag arrives before
+              // executing; bracket calls are atomic.
+              const ready = isXml ? replyAcc.includes("</tool_call>") : true;
+              if (!ready) {
+                // It's still generating the tag — hold off feeding it to the UI.
+                continue;
+              }
+              let toolName = "";
+              let toolArg = "";
+              if (isBracket) {
+                toolName = normTool;
+                toolArg = (bracketMatch[2] || "").trim();
+              } else {
+                const tagStart = replyAcc.indexOf("<tool_call>");
+                const tagEnd = replyAcc.indexOf("</tool_call>") + 12;
+                toolName = replyAcc.substring(tagStart + 11, tagEnd - 12);
+              }
+
+              const resultText = await buildToolResult(toolName, toolArg);
+
+              if (resultText !== null) {
+                abortCtrl.abort(); // Cancel the rest of the stream
+                if (typer) typer.reset(); // Hide the raw tool call from the UI
+
+                // Add the tool call to the context and history
+                finalMessages.push({ role: "assistant", content: replyAcc });
+                history.push({ role: "assistant", content: replyAcc });
+
+                // Add the tool result to the context and history
+                const resultMsg = { role: "system", content: resultText };
+                finalMessages.push(resultMsg);
+                history.push(resultMsg);
+
+                // Reset for the next loop
+                abortCtrl = new AbortController();
+                replyAcc = "";
+                loopFetch = true;
+                break; // break the read loop
+              }
+              // Unknown tool name — let it stream normally.
+              continue;
+            }
+
+            if (!sawReply) {
+              sawReply = true;
+              if (typer) await typer.drain();
+              if (sawThink && phase === "think-stream") {
+                await fadeOutAndHide(220);
+                await new Promise((r) => setTimeout(r, 100));
+              }
+              await showSpeak();
+              speakEl = document.getElementById("speak");
+              typer = new Typewriter(speakEl, { onChange: onTick });
+            }
+            typer.feed(obj.content);
+          } else if (obj.event === "error") {
+            throw new Error(obj.message || "model error");
           }
-          replyAcc += obj.content;
-          typer.feed(obj.content);
-        } else if (obj.event === "error") {
-          throw new Error(obj.message || "model error");
+        }
+        if (loopFetch) break;
+      }
+    }
+
+    // Rescue: the small model sometimes answers tool requests with
+    // "I don't know how to" instead of emitting a bracket. If the user's
+    // message clearly maps to a tool, run it directly so the feature works.
+    if (!loopFetch && REFUSAL_RE.test(replyAcc)) {
+      const intent = resolveToolIntent(text);
+      if (intent) {
+        const rt = await buildToolResult(intent.tool, intent.arg);
+        if (rt) {
+          finalMessages.push({ role: "system", content: rt });
+          history.push({ role: "system", content: rt });
+          console.log("[minicpm-chat] Rescue: model refused tool, ran", intent.tool);
+          replyAcc = stripToolResultTags(rt);
         }
       }
     }
 
     if (typer) await typer.drain();
     history.push({ role: "assistant", content: replyAcc });
+
     if (speakEl) {
       speakEl.classList.remove("streaming");
-      // Swap the plain typewriter text for a markdown-rendered version
-      // once the stream completes — keeps the streaming reveal smooth
-      // (no HTML thrash per chunk) while still presenting bold/italics/
-      // headings/lists/code in their final form.
       speakEl.classList.add("rendered");
       speakEl.innerHTML = renderMarkdown(replyAcc);
     }
 
-    // ── New: keep the bubble alive for follow-up turns. After a tiny
-    // dwell so the streaming animation settles, swap the speak content
-    // back to an ask box so the user can type the next message without
-    // having to re-click the pet. If no follow-up arrives within the
-    // inactivity window, the bubble fades quietly.
     const readingMs = 1500;
     const lastReply = replyAcc;
     fadeTimer = setTimeout(async () => {
       fadeTimer = null;
-      // Re-render with the previous reply pinned dimly above a fresh input.
       await showAsk(lastReply);
-      // Auto-fade if user idles in ask phase for ~25s.
       fadeTimer = setTimeout(() => {
         fadeTimer = null;
         if (phase === "ask" && (!inputEl || !inputEl.value.trim())) {
@@ -994,6 +1141,93 @@ async function submit(text) {
 }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// ── Tool execution shared by the live bracket loop and the rescue path ──
+async function buildToolResult(toolName, toolArg) {
+  if (toolName.includes("get_browser_state")) {
+    console.log("[minicpm-chat] Executing tool: get_browser_state");
+    let summary = "";
+    try { summary = await window.minicpm.getAttentionSummary(); } catch {}
+    return `<tool_result>${summary || "No active windows found."}</tool_result>\nNow answer the user's question:`;
+  }
+  if (toolName.includes("memory_search") || toolName.includes("search_memory")) {
+    console.log("[minicpm-chat] Executing tool: memory_search", toolArg);
+    let res = { memories: [] };
+    try { res = (await window.minicpm.memorySearch(toolArg)) || {}; } catch {}
+    const items = (res.memories || [])
+      .map((m) => `- [${m.category || "personal"}] ${m.content}`)
+      .join("\n");
+    return `<tool_result>Memory search for "${toolArg}":\n${items || "No relevant memories found."}</tool_result>\nNow answer the user's question using what you remember:`;
+  }
+  if (toolName.includes("memory_remember")) {
+    console.log("[minicpm-chat] Executing tool: memory_remember", toolArg);
+    let res = {};
+    try { res = (await window.minicpm.memoryRemember(toolArg, "personal")) || {}; } catch {}
+    const note = res && res.stored === false
+      ? "That looked private, so I did not save it."
+      : "Saved to memory.";
+    return `<tool_result>${note}</tool_result>\nContinue replying to the user:`;
+  }
+  if (toolName.includes("get_transcript")) {
+    console.log("[minicpm-chat] Executing tool: get_transcript");
+    let res = { available: false };
+    try { res = (await window.minicpm.getTranscript()) || {}; } catch {}
+    if (res.available && res.transcript) {
+      return `<tool_result>Transcript${res.source === "playing" ? " (now playing)" : " (last watched)"}:\n${res.transcript}</tool_result>\nUse this to answer the user's question about the video:`;
+    }
+    return `<tool_result>No video transcript is available right now.</tool_result>\nContinue replying to the user:`;
+  }
+  if (toolName.includes("goal_countdown")) {
+    console.log("[minicpm-chat] Executing tool: goal_countdown");
+    let res = { active: false };
+    try { res = (await window.minicpm.goalCountdown()) || {}; } catch {}
+    const txt = res.active
+      ? `Goal: ${res.text}. Time left: ${res.remaining || "unknown"}.`
+      : "No active goal is set.";
+    return `<tool_result>${txt}</tool_result>\nContinue replying to the user:`;
+  }
+  if (toolName.includes("list_sessions")) {
+    console.log("[minicpm-chat] Executing tool: list_sessions");
+    let res = { sessions: [] };
+    try { res = (await window.minicpm.listSessions()) || {}; } catch {}
+    const items = (res.sessions || []).map((s) => `- ${s.title || s.id} (${s.agent || "agent"}, ${s.state || "?"})`).join("\n");
+    return `<tool_result>Active sessions:\n${items || "None"}</tool_result>\nContinue replying to the user:`;
+  }
+  if (toolName.includes("launch_jupyter")) {
+    console.log("[minicpm-chat] Executing tool: launch_jupyter");
+    let res = { started: false };
+    try { res = (await window.minicpm.launchJupyter()) || {}; } catch {}
+    return `<tool_result>${res.message || (res.started ? "JupyterLab is starting." : "Could not start JupyterLab.")}</tool_result>\nContinue replying to the user:`;
+  }
+  return null;
+}
+
+// Strip the <tool_result> wrapper + the trailing model instruction so the
+// raw result can be shown directly to the user when we rescue a refusal.
+function stripToolResultTags(text) {
+  return text
+    .replace(/<\/?tool_result>/g, "")
+    .replace(/\n(Now answer the user's question(?: using what you remember)?|Use this to answer the user's question about the video|Continue replying to the user):?/g, "")
+    .trim();
+}
+
+// Lightweight intent detection on the USER's message. Used as a rescue when
+// the (small) model refuses to emit a tool bracket and answers with "I don't
+// know how to". Returns { tool, arg } or null.
+function resolveToolIntent(text) {
+  const t = (text || "").toLowerCase();
+  if (/\b(transcript|subtitle|caption|what(?:'| i)s being said|what are they saying)\b/.test(t)) return { tool: "get_transcript", arg: "" };
+  if (/\b(jupyter|notebook)\b/.test(t)) return { tool: "launch_jupyter", arg: "" };
+  if (/\b(session|which agent|active agent|terminals?)\b/.test(t)) return { tool: "list_sessions", arg: "" };
+  if (/\b(countdown|how (?:much|long).*(?:left|time)|time left on (?:my )?goal|my goal)\b/.test(t)) return { tool: "goal_countdown", arg: "" };
+  if (/\b(what am i watching|what(?:'| i)s on (?:my )?screen|what are you seeing|browser state)\b/.test(t)) return { tool: "get_browser_state", arg: "" };
+  const rm = text.match(/remember (?:that )?(.+)/i) || text.match(/note to (?:myself|self)[,:]? (.+)/i) || text.match(/save (?:this|that|it)[,:]? (.+)/i);
+  if (rm) return { tool: "memory_remember", arg: (rm[1] || text).trim() };
+  if (/\b(search|recall|look up|what do you know about)\b/.test(t)) return { tool: "search_memory", arg: text.trim() };
+  return null;
+}
+
+const REFUSAL_RE = /\b(i don'?t know how to|i can'?t (?:do|help|answer)|i cannot|i am unable|i'?m unable|i don'?t have (?:a |an |the )?way to|i'?m not able to)\b/i;
 
 // ── Typewriter: paint chars at a steady, focused pace ────────────────────
 // The model can produce tokens in bursty chunks (a Chinese word at a time).
@@ -1156,6 +1390,45 @@ if (window.minicpm) {
     } else {
       exitEditMode();
     }
+  });
+
+  if (window.minicpm.onAskConfirmation) window.minicpm.onAskConfirmation(async (payload) => {
+    if (!payload || !payload.id) return;
+    if (abortCtrl) { try { abortCtrl.abort(); } catch {} abortCtrl = null; }
+    clearFade();
+    phase = "ask-confirmation";
+
+    let buttonsHtml = "";
+    if (payload.buttons) {
+      payload.buttons.forEach((btn, idx) => {
+        buttonsHtml += `<button class="conf-btn" data-idx="${idx}" style="margin-top: 6px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--text); cursor: pointer; font-size: 13px; transition: background 0.2s;">${escapeHtml(btn)}</button>`;
+      });
+    }
+
+    content.innerHTML =
+      `<div style="display:flex; flex-direction:column; gap:4px;">
+         <div style="font-weight:600; color:var(--accent); margin-bottom: 2px;">${escapeHtml(payload.title || "Confirm")}</div>
+         <div style="font-size:13px; color:var(--text); line-height: 1.4;">${escapeHtml(payload.message || "")}</div>
+         <div style="display:flex; flex-wrap:wrap; gap:6px;">
+           ${buttonsHtml}
+         </div>
+       </div>`;
+
+    await measureAndShow({ animate: true, width: 280 });
+
+    const btns = content.querySelectorAll(".conf-btn");
+    btns.forEach(btn => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.getAttribute("data-idx"), 10);
+        if (window.minicpm.replyConfirmation) {
+          window.minicpm.replyConfirmation(payload.id, idx);
+        }
+        hideBubble({ fade: true });
+      });
+      // Add hover effect via JS since it's inline
+      btn.addEventListener("mouseenter", () => { btn.style.background = "var(--accent)"; btn.style.color = "var(--bg)"; });
+      btn.addEventListener("mouseleave", () => { btn.style.background = "transparent"; btn.style.color = "var(--text)"; });
+    });
   });
 }
 

@@ -222,6 +222,12 @@ module.exports = function initMenu(ctx) {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
         },
       },
+      {
+        label: t("openMemoryDashboard"),
+        click: () => {
+          if (typeof ctx.openMemoryDashboard === "function") ctx.openMemoryDashboard();
+        },
+      },
       buildBringToPrimaryDisplayMenuItem(),
     );
     // #329: surface the update item in the tray menu. The label switches
@@ -396,6 +402,12 @@ module.exports = function initMenu(ctx) {
         label: t("openDashboard"),
         click: () => {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
+        },
+      },
+      {
+        label: t("openMemoryDashboard"),
+        click: () => {
+          if (typeof ctx.openMemoryDashboard === "function") ctx.openMemoryDashboard();
         },
       },
     ];

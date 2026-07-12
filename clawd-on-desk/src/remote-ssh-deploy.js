@@ -59,6 +59,7 @@ const HOOK_FILES = [
   "codex-subagent-fields.js",
   "copilot-hook.js",
   "copilot-install.js",
+  "attention-signal.js",
 ];
 
 // Resolve hooks dir for both dev (source tree) and packaged (asar.unpacked).

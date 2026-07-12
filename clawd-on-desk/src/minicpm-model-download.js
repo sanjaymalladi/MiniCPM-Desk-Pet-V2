@@ -28,6 +28,15 @@ const PROVIDERS = {
   },
 };
 
+const VISION_FILENAME_SET = new Set([
+  "MiniCPM-V-4_6-Q4_K_M.gguf",
+  "mmproj-model-f16.gguf",
+]);
+
+function isVisionFileName(name) {
+  return VISION_FILENAME_SET.has(String(name || ""));
+}
+
 function normalizeProvider(value) {
   const v = String(value || "").trim().toLowerCase();
   if (v === "hf" || v === "huggingface" || v === "hugging-face") return "huggingface";
@@ -274,7 +283,10 @@ function downloadUrlToFile({
           return;
         }
 
-        const total = Number(res.headers["content-length"]) || MODEL_SIZE_BYTES;
+        const contentLength = Number(res.headers["content-length"]);
+        // Do not fall back to the text model's size for non-text downloads
+        // (e.g. the ~5GB vision LM), whose real content-length is unknown here.
+        const total = contentLength || (isVisionFileName(destName) ? 0 : MODEL_SIZE_BYTES);
         file = fs.createWriteStream(tmp);
         res.on("error", fail);
         res.on("data", (chunk) => {
@@ -284,7 +296,7 @@ function downloadUrlToFile({
               onProgress({
                 phase: "transfer",
                 provider: providerId,
-                file: MODEL_FILENAME,
+                file: destName,
                 bytes_done: bytesDone,
                 bytes_total: total,
               });
@@ -317,16 +329,21 @@ function downloadUrlToFile({
 
 async function downloadMiniCpmModel({
   destinationDir,
+  filename,
   env = process.env,
   onProgress,
   requestTextImpl = requestText,
   downloadImpl = downloadUrlToFile,
   snapshotCountImpl = triggerModelScopeSnapshotCount,
+  modelScopeModelId = MODELSCOPE_MODEL_ID,
   agent,
 } = {}) {
   if (!destinationDir) throw new Error("destinationDir is required");
   ensureDir(destinationDir);
-  const destination = path.join(destinationDir, MODEL_FILENAME);
+  // Allow callers (e.g. downloadVisionModels) to download a file under a
+  // name that differs from the default text-model filename.
+  const destName = filename || MODEL_FILENAME;
+  const destination = path.join(destinationDir, destName);
   try {
     const st = fs.statSync(destination);
     if (st.isFile() && st.size > 0) {
@@ -357,7 +374,7 @@ async function downloadMiniCpmModel({
       }
       if (providerId === "modelscope" && typeof snapshotCountImpl === "function") {
         try {
-          await snapshotCountImpl({ env, agent });
+          await snapshotCountImpl({ env, agent, modelId: modelScopeModelId });
           if (typeof onProgress === "function") {
             onProgress({ phase: "snapshot-count", provider: providerId, ok: true });
           }
@@ -381,7 +398,7 @@ async function downloadMiniCpmModel({
         agent,
       });
       if (typeof onProgress === "function") {
-        onProgress({ phase: "complete", provider: providerId, file: MODEL_FILENAME, path: destination });
+        onProgress({ phase: "complete", provider: providerId, file: destName, path: destination });
       }
       return {
         ...result,
@@ -405,6 +422,52 @@ async function downloadMiniCpmModel({
   throw error;
 }
 
+async function downloadVisionModels({ destinationDir, env = process.env, onProgress, agent } = {}) {
+  const VISION_FILES = ["MiniCPM-V-4_6-Q4_K_M.gguf", "mmproj-model-f16.gguf"];
+  const results = [];
+
+  if (agent === undefined) {
+    agent = createProxyAgent("https://huggingface.co", env);
+  }
+
+  for (const filename of VISION_FILES) {
+    const destination = path.join(destinationDir, filename);
+    try {
+      const st = fs.statSync(destination);
+      if (st.isFile() && st.size > 0) {
+        results.push({ ok: true, path: destination, provider: "local", skipped: true });
+        continue;
+      }
+    } catch {}
+
+    // Point the active providers at the correct vision-model URL for this
+    // file, then download under that exact filename (downloadMiniCpmModel
+    // writes to destinationDir/<filename> when `filename` is supplied).
+    const origHfUrl = PROVIDERS.huggingface.url;
+    const origMsUrl = PROVIDERS.modelscope.url;
+    const hfUrl = `https://huggingface.co/openbmb/MiniCPM-V-4.6-gguf/resolve/main/${filename}`;
+    const msUrl = `https://modelscope.cn/models/OpenBMB/MiniCPM-V-4.6-gguf/resolve/master/${filename}`;
+    PROVIDERS.huggingface.url = hfUrl;
+    PROVIDERS.modelscope.url = msUrl;
+
+    try {
+      const res = await downloadMiniCpmModel({
+        destinationDir,
+        filename,
+        env,
+        onProgress,
+        agent,
+        modelScopeModelId: "OpenBMB/MiniCPM-V-4.6-gguf",
+      });
+      results.push(res);
+    } finally {
+      PROVIDERS.huggingface.url = origHfUrl;
+      PROVIDERS.modelscope.url = origMsUrl;
+    }
+  }
+  return results;
+}
+
 module.exports = {
   MODEL_FILENAME,
   MODEL_SIZE_BYTES,
@@ -416,6 +479,7 @@ module.exports = {
   buildModelScopeUserAgent,
   detectCountry,
   downloadMiniCpmModel,
+  downloadVisionModels,
   getTokenForProvider,
   normalizeProvider,
   parseCloudflareTrace,

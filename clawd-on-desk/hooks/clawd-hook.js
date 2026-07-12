@@ -6,6 +6,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const { postStateToRunningServer, readHostPrefix } = require("./server-config");
+const { sendAttentionSignal, signalFromClaudeEvent } = require("./attention-signal");
 const { fitStateBodyToByteBudget } = require("./state-payload-size");
 const { extractClaudeContextUsageFromEntries } = require("./context-usage");
 const { createPidResolver, readStdinJson, getPlatformConfig } = require("./shared-process");
@@ -465,6 +466,12 @@ function main() {
     .then((payload) => {
       const body = buildStateBody(event, payload || {}, resolve);
       if (!body) process.exit(0);
+      // Attention Companion: feed agent-tool signals (questions, file reads/writes, git commit)
+      // into stuck-detection + task-completion. Fire-and-forget; never blocks the agent.
+      try {
+        const sig = signalFromClaudeEvent(event, payload || {});
+        if (sig) sendAttentionSignal(sig);
+      } catch (e) {}
       // Byte-fit the body so a long CJK assistant_last_output can't push it past
       // the server's /state cap and trigger a headerless 413 (read back as
       // posted=false, dropping the happy completion). hooks/state-payload-size.js.

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, screen, ipcMain, globalShortcut, nativeTheme, dialog, shell, nativeImage, powerSaveBlocker, powerMonitor, clipboard } = require("electron");
+const { app, BrowserWindow, screen, ipcMain, globalShortcut, nativeTheme, dialog, shell, nativeImage, powerSaveBlocker, powerMonitor, clipboard, Notification } = require("electron");
 // ── Linux/Wayland: relaunch under XWayland so the pet is draggable (issue #441) ──
 // Native Wayland ignores client-side window positioning and blocks global cursor
 // queries, so the pet spawns centered, can't be dragged, and has no tracking;
@@ -13,6 +13,32 @@ const { app, BrowserWindow, screen, ipcMain, globalShortcut, nativeTheme, dialog
 // so the fix is to relaunch ourselves with that flag: this first process selects
 // Wayland but exits before creating any window; the second boots into XWayland.
 const { planXWaylandRelaunch } = require("./linux-ozone");
+
+// ── Runtime error capture ──
+// Surface otherwise-silent crashes (e.g. a transient window or a render-process
+// hang) to a log the user can inspect. Written to userData after app ready,
+// falling back to %TEMP% before then.
+const _fs = require("fs");
+const _os = require("os");
+const _path = require("path");
+let _runtimeErrorLog = null;
+function runtimeErrorLogPath() {
+  if (_runtimeErrorLog) return _runtimeErrorLog;
+  try {
+    const dir = (app && app.isReady && app.isReady()) ? app.getPath("userData") : _os.tmpdir();
+    _runtimeErrorLog = _path.join(dir, "clawd-runtime-errors.log");
+  } catch (_) {
+    _runtimeErrorLog = _path.join(_os.tmpdir(), "clawd-runtime-errors.log");
+  }
+  return _runtimeErrorLog;
+}
+function logRuntimeError(kind, err) {
+  const msg = `[${new Date().toISOString()}] ${kind}: ${err && (err.stack || err.message) || err}\n`;
+  try { _fs.appendFileSync(runtimeErrorLogPath(), msg); } catch (_) { /* best-effort */ }
+  console.error(msg);
+}
+process.on("uncaughtException", (err) => logRuntimeError("uncaughtException", err));
+process.on("unhandledRejection", (reason) => logRuntimeError("unhandledRejection", reason));
 const _xwaylandRelaunch = planXWaylandRelaunch({
   platform: process.platform,
   env: process.env,
@@ -98,6 +124,9 @@ const {
 } = require("./telegram-approval-runtime-status");
 const { createTelegramMigrationController } = require("./telegram-migration-controller");
 const { createTelegramSidecarStatusBridge } = require("./telegram-sidecar-status-bridge");
+const attentionStateManager = require("./attention-state-manager");
+const { VisionSidecarManager } = require("./vision-sidecar-manager");
+const attentionVisionClient = require("./attention-vision-client");
 const initUpdateBubble = require("./update-bubble");
 const { registerUpdateBubbleIpc } = initUpdateBubble;
 const createSettingsAnimationOverridesMain = require("./settings-animation-overrides-main");
@@ -320,6 +349,7 @@ let hardwareBuddyTestApprovalPromise = null;
 let lastHardwareBuddyStatusLogKey = "";
 let unsubscribeHardwareBuddySettings = null;
 let _minicpmChat = null;
+let _memoryService = null;
 let _minicpmOnboarding = null;
 const shortcutHandlers = {
   togglePet: () => togglePetVisibility(),
@@ -1583,6 +1613,16 @@ const _tickCtx = {
   getHitRectScreen,
   getAssetPointerPayload,
   get roam() { return _roam; },
+  // v3 memory: idle-gated world research (plan §1.3). Called on every idle
+  // edge so the existing idle detector (not a second one) drives research.
+  onIdleEdge: (idle) => {
+    if (!_memoryService || _settingsController.get("memoryWorldEnabled") !== true) return;
+    if (!idle) return;
+    try {
+      _memoryService.resetResearchIdle();
+      _memoryService.researchTick({ isIdle: true }).catch(() => {});
+    } catch (e) { /* best-effort */ }
+  },
 };
 const _tick = require("./tick")(_tickCtx);
 requestFastTick = (maxDelay) => _tick.scheduleSoon(maxDelay);
@@ -1687,6 +1727,99 @@ showDashboard = _dashboard.showDashboard;
 broadcastDashboardSessionSnapshot = _dashboard.broadcastSessionSnapshot;
 sendDashboardI18n = _dashboard.sendI18n;
 
+// v3 memory: Supermemory UI window (plan §6). Reads/writes memory via the
+// service; toggles route through the settings controller like every pref.
+const _memoryDashboard = require("./memory-dashboard")({
+  getMemoryService: () => _memoryService,
+  getPetWindowBounds,
+  getNearestWorkArea,
+  getTextScale: () => effectiveTextScaleForKey(
+    getWindowDisplayKey(_dashboard ? _dashboard.getWindow() : null) || getPetDisplayKey()
+  ),
+  t: (key) => translate(key),
+  iconPath: settingsWindowRuntime.getIconPath(),
+  getPref: (key) => _settingsController.get(key),
+  setPref: (key, value) => _settingsController.applyUpdate(key, value),
+});
+
+// Open the Supermemory UI from the Settings tab / menu.
+try {
+  ipcMain.on("memory-dashboard:open", () => {
+    try { _memoryDashboard.show(); } catch (e) { console.warn("[main] open memory dashboard failed:", e && e.message); }
+  });
+} catch (e) {}
+
+// v3 memory (plan §4 phase 10): read-path for OpenCode / Claude Code plugins.
+// A hook/plugin can push an already-captured transcript (screen recording,
+// meeting capture, referenced video) into the same summarize → work-filter →
+// store pipeline used by the in-app video detector. No-op when memory is off.
+try {
+  ipcMain.handle("minicpm:memory-ingest-video", async (_evt, payload) => {
+    if (!_memoryService || _settingsController.get("memoryEnabled") !== true) {
+      return { stored: false, reason: "memory-disabled" };
+    }
+    const arg = payload && typeof payload === "object" ? payload : {};
+    try {
+      const res = await _memoryService.ingestExternalVideo({
+        url: arg.url, title: arg.title, transcript: arg.transcript,
+      });
+      return res || { stored: false, reason: "no-result" };
+    } catch (e) {
+      return { stored: false, reason: "error", error: e && e.message };
+    }
+  });
+} catch (e) {}
+
+// v3 memory tools for the chat model (plan §3 / user feature set).
+try {
+  // Transcript of the video currently playing (or the last watched one).
+  ipcMain.handle("minicpm:get-transcript", async () => {
+    if (!_memoryService || _settingsController.get("memoryEnabled") !== true) {
+      return { available: false };
+    }
+    const pending = _memoryService.getPendingVideoTranscript ? _memoryService.getPendingVideoTranscript() : null;
+    if (pending) return { available: true, source: "playing", transcript: pending };
+    try {
+      const last = await _memoryService.getLastVideoMemory();
+      if (last) return { available: true, source: "last", transcript: last.content, videoId: last.videoId };
+    } catch (e) {}
+    return { available: false };
+  });
+
+  // Goal countdown snapshot.
+  ipcMain.handle("minicpm:goal-countdown", async () => {
+    if (!_memoryService) return { active: false };
+    try { return _memoryService.getGoalCountdown(); } catch (e) { return { active: false }; }
+  });
+
+  // Active coding-agent sessions the user can jump to.
+  ipcMain.handle("minicpm:list-sessions", async () => {
+    try {
+      const snap = _state && typeof _state.buildSessionSnapshot === "function" ? _state.buildSessionSnapshot() : null;
+      const sessions = (snap && Array.isArray(snap.sessions) ? snap.sessions : [])
+        .filter((s) => s && s.badge !== "done" && s.state && s.state !== "idle" && s.state !== "sleeping")
+        .map((s) => ({ id: s.id, title: s.title || s.name, agent: s.agent, state: s.state, badge: s.badge }));
+      return { sessions };
+    } catch (e) { return { sessions: [] }; }
+  });
+
+  // Launch JupyterLab as a detached process; tell the user it's coming.
+  ipcMain.handle("minicpm:launch-jupyter", async () => {
+    try {
+      const { spawn } = require("child_process");
+      const child = spawn("jupyter", ["lab"], {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      });
+      child.unref();
+      return { started: true, message: "On it — spinning up JupyterLab. Your notebook will be ready soon." };
+    } catch (e) {
+      return { started: false, message: "Couldn't launch JupyterLab — is it installed? (pip install jupyterlab)", error: e && e.message };
+    }
+  });
+} catch (e) {}
+
 _minicpmChat = require("./minicpm-chat")({
   getPetWindowBounds,
   getPetHitRect: () => {
@@ -1694,6 +1827,34 @@ _minicpmChat = require("./minicpm-chat")({
   },
   getNearestWorkArea,
   getLang: () => lang,
+  getMemoryService: () => _memoryService,
+});
+
+// v3 memory: orchestrator that owns the always-on Supermemory sidecar + client.
+// Started later in app.whenReady() (only if memoryEnabled), and torn down on
+// before-quit. Reads its prefs live via _settingsController so toggling the
+// setting in Settings takes effect on next launch.
+_memoryService = require("./memory-service").initMemory({
+  getUserData: () => { try { return app.getPath("userData"); } catch (_) { return process.env.APPDATA || "."; } },
+  getPrefs: () => ({
+    memoryEnabled: _settingsController.get("memoryEnabled"),
+    memoryAutoLaunch: _settingsController.get("memoryAutoLaunch"),
+    memoryPort: _settingsController.get("memoryPort"),
+    memoryApiKey: _settingsController.get("memoryApiKey"),
+    memoryDataDir: _settingsController.get("memoryDataDir"),
+    memoryLlmBaseUrl: _settingsController.get("memoryLlmBaseUrl"),
+    memoryLlmApiKey: _settingsController.get("memoryLlmApiKey"),
+  }),
+  // OS notification delivery for proactive messages (plan §4). Respects the
+  // user's mute / quiet-hours inside the ProactiveMessenger; this just shows it.
+  notify: (message, meta) => {
+    try {
+      if (typeof Notification === "undefined") return;
+      const n = new Notification({ title: "Clawd", body: String(message || "") });
+      n.show();
+    } catch (e) { /* notifications unavailable */ }
+  },
+  logger: (msg) => { if (msg) console.log(`[memory] ${msg}`); },
 });
 
 function openMinicpmChat() {
@@ -1706,6 +1867,8 @@ _minicpmOnboarding = require("./minicpm-onboarding")({
   getSidecarUrl: () => _minicpmChat.getSidecarUrl(),
   getChat: () => _minicpmChat,
   getLang: () => lang,
+  settingsController: _settingsController,
+  detectInstalledBrowsers: () => detectInstalledBrowsers(),
   ensureSidecarRunning: async () => {
     try {
       const r = await _minicpmChat.ensureSidecarReady();
@@ -1803,6 +1966,14 @@ const _serverCtx = {
         _minicpmChat.onStateEvent(data);
       }
     } catch {}
+  },
+  onFocusEvent: (event) => {
+    try {
+      const { bus } = require("./attention-event-bus");
+      bus.publish(event);
+    } catch (err) {
+      console.warn("[attention] Failed to publish focus event:", err && err.message);
+    }
   },
 };
 const _server = require("./server")(_serverCtx);
@@ -2887,6 +3058,8 @@ const _menuCtx = {
   checkForUpdates: (...args) => checkForUpdates(...args),
   getUpdateMenuItem: () => getUpdateMenuItem(),
   openDashboard: () => showDashboard(),
+  openMemoryDashboard: () => _memoryDashboard.show(),
+  getMemoryService: () => _memoryService,
   launchClaudeSession: (mode, cwd, sessionId) => launchClaudeSession(mode, cwd, sessionId),
   newSessionWithFolder: async (t) => {
     const parent = win && !win.isDestroyed() ? win : null;
@@ -3302,6 +3475,111 @@ registerSessionIpc({
   getLanWsServer: () => _lanWss,
 });
 
+// Detect installed browsers at module scope so it is callable from the
+// onboarding context (module scope) as well as the in-window IPC handler.
+function detectInstalledBrowsers() {
+  const found = new Set();
+  try {
+    if (process.platform === "win32") {
+      const pf = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.ProgramW6432].filter(Boolean);
+      const exes = {
+        chrome: ["Google/Chrome/Application/chrome.exe", "Chrome/Application/chrome.exe"],
+        edge: ["Microsoft/Edge/Application/msedge.exe"],
+        firefox: ["Mozilla Firefox/firefox.exe"],
+        brave: ["BraveSoftware/Brave-Browser/Application/brave.exe"],
+        opera: ["Opera/launcher.exe", "Opera Software/Opera/launcher.exe"],
+        vivaldi: ["Vivaldi/Application/vivaldi.exe"],
+        chromium: ["Chromium/Application/chrome.exe", "Chromium/chrome.exe"],
+      };
+      for (const id of Object.keys(exes)) {
+        for (const base of pf) {
+          for (const rel of exes[id]) {
+            try { if (fs.existsSync(path.join(base, rel))) found.add(id); } catch {}
+          }
+        }
+      }
+    } else if (process.platform === "darwin") {
+      const apps = {
+        chrome: "/Applications/Google Chrome.app",
+        edge: "/Applications/Microsoft Edge.app",
+        firefox: "/Applications/Firefox.app",
+        brave: "/Applications/Brave Browser.app",
+        opera: "/Applications/Opera.app",
+        arc: "/Applications/Arc.app",
+        vivaldi: "/Applications/Vivaldi.app",
+        chromium: "/Applications/Chromium.app",
+        safari: "/Applications/Safari.app",
+      };
+      for (const id of Object.keys(apps)) {
+        try { if (fs.existsSync(apps[id])) found.add(id); } catch {}
+      }
+    } else {
+      const bins = ["google-chrome", "chromium", "chromium-browser", "firefox", "brave", "brave-browser", "opera", "vivaldi", "microsoft-edge"];
+      for (const b of bins) {
+        try {
+          const out = require("child_process").execSync(`which ${b}`, { timeout: 1000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+          if (out) found.add(require("path").basename(out).replace(/\.exe$/, ""));
+        } catch {}
+      }
+    }
+  } catch (err) { console.error("detectInstalledBrowsers:", err); }
+  return Array.from(found);
+}
+
+// ── Settings → Attention IPC (registered once at module scope) ───────────────
+// These were previously registered inside createWindow, so every window
+// recreation re-registered the handlers and left duplicate listeners. Register
+// them once here, alongside the other ipcMain.handle calls.
+
+// Settings → Attention: same per-browser scan used by onboarding, exposed
+// for the post-onboarding "install the tab-tracking helper" flow.
+ipcMain.handle("minicpm-settings:detect-browsers", async () => {
+  try {
+    const scan = new BrowserScan();
+    const detected = detectInstalledBrowsers();
+    const installed = scan.detectInstalled(detected);
+    const plan = scan.buildInstallPlan(installed);
+    return { ok: true, detected, plan };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err), plan: [] };
+  }
+});
+
+// Settings → Attention: download the MiniCPM-V 4.6 vision model so the
+// last-resort screenshot classifier can run. Mirrors the onboarding flow.
+ipcMain.handle("minicpm-settings:start-vision-model-download", async () => {
+  try {
+    const chat = _minicpmChat;
+    const destinationDir = (chat && typeof chat.getDefaultModelDir === "function")
+      ? chat.getDefaultModelDir()
+      : (app.getPath("userData") + path.sep + "models");
+    const { downloadVisionModels } = require("./minicpm-model-download");
+    const results = await downloadVisionModels({ destinationDir });
+    return { ok: results.every((r) => r && r.ok), results };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// Settings → Attention: reveal the matching tab-tracking extension folder so
+// the user can load it unpacked. Chromium-family browsers share the MV3
+// build; Firefox uses the MV2 build.
+ipcMain.handle("minicpm-settings:open-extension-folder", async (_evt, { browserId } = {}) => {
+  const id = String(browserId || "").toLowerCase();
+  const chromium = ["chrome", "edge", "brave", "opera", "arc", "vivaldi", "chromium"];
+  let folder = null;
+  if (chromium.includes(id)) folder = "focus-bridge-chrome";
+  else if (id === "firefox") folder = "focus-bridge-firefox";
+  if (!folder) return { ok: false, unsupported: true };
+  const dir = path.join(__dirname, "..", "extensions", folder);
+  try {
+    await shell.openPath(dir);
+    return { ok: true, dir };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 function createWindow() {
   // Read everything from the settings controller. The mirror caches above
   // (lang/showTray/etc.) were already initialized at module-load time, so
@@ -3399,6 +3677,46 @@ function createWindow() {
   ipcMain.removeAllListeners("open-minicpm-chat");
   ipcMain.on("open-minicpm-chat", () => {
     try { openMinicpmChat(); } catch (err) { console.error("openMinicpmChat:", err); }
+  });
+
+  // §4 permission-based sharing — surface a factual session summary on demand.
+  ipcMain.on("minicpm:share-recap", () => {
+    try {
+      const decision = global.__attentionDecision;
+      if (decision && typeof decision.shareRecapWithPair === "function") {
+        decision.shareRecapWithPair();
+      }
+    } catch (err) { console.error("share-recap:", err); }
+  });
+
+  // §3.1 — per-browser tab-tracking extension plan. Onboarding calls this with
+  // the OS-detected browser app ids and renders one install prompt per browser.
+  ipcMain.on("minicpm:attention-browser-plan", (event, detectedAppIds) => {
+    try {
+      const scan = new BrowserScan();
+      const installed = scan.detectInstalled(Array.isArray(detectedAppIds) ? detectedAppIds : []);
+      const plan = scan.buildInstallPlan(installed);
+      if (event && event.sender && typeof event.sender.send === "function") {
+        event.sender.send("minicpm:attention-browser-plan", plan);
+      }
+    } catch (err) { console.error("attention-browser-plan:", err); }
+  });
+
+  // §3.1 — OS browser discovery. Probes known install locations per platform
+  // and returns the per-browser extension-install plan so onboarding / the
+  // Settings attention tab can prompt PER BROWSER (not once). We cannot detect
+  // whether the extension is already installed from the main process, so every
+  // detected browser is offered an install prompt until the user confirms.
+  ipcMain.on("minicpm:detect-browsers", (event) => {
+    try {
+      const scan = new BrowserScan();
+      const detected = detectInstalledBrowsers();
+      const installed = scan.detectInstalled(detected);
+      const plan = scan.buildInstallPlan(installed);
+      if (event && event.sender && typeof event.sender.send === "function") {
+        event.sender.send("minicpm:detect-browsers", { detected, plan });
+      }
+    } catch (err) { console.error("detect-browsers:", err); }
   });
 
   registerPetInteractionIpc({
@@ -3732,6 +4050,20 @@ if (!gotTheLock) {
   }
 
   app.whenReady().then(() => {
+    // Capture renderer crashes / gone processes (a possible cause of a
+    // transient blank transparent window) so they land in the runtime log.
+    app.on("web-contents-created", (_evt, wc) => {
+      const tag = wc && wc.getURL ? wc.getURL() : "unknown";
+      wc.on("render-process-gone", (_e, details) => {
+        logRuntimeError("render-process-gone", `url=${tag} reason=${details && details.reason}`);
+      });
+      wc.on("crashed", (_e, details) => {
+        logRuntimeError("webcontents-crashed", `url=${tag} reason=${details && details.reason}`);
+      });
+      wc.on("did-fail-load", (_e, errorCode, errorDescription, failedUrl) => {
+        logRuntimeError("did-fail-load", `url=${failedUrl || tag} code=${errorCode} desc=${errorDescription}`);
+      });
+    });
     // macOS: override the dock icon with a version padded to the macOS icon
     // grid (~80.5% of the canvas, ~100px transparent margin per side) so the
     // Dock tile matches neighbor apps. The build-time icon.png sits ~72.6%
@@ -3836,6 +4168,16 @@ if (!gotTheLock) {
       hardwareBuddyLog(`start failed: ${err && err.message ? err.message : err}`);
     }
 
+    // v3 memory: launch the always-on Supermemory sidecar if memoryEnabled.
+    // Failures are non-fatal — chat degrades gracefully without memory.
+    if (_memoryService && typeof _memoryService.start === "function") {
+      _memoryService.start().then((r) => {
+        if (r && r.started) console.log("Clawd: memory service started (mode:", r.mode, ")");
+      }).catch((err) => {
+        console.warn("Clawd: memory service failed to start:", err && err.message);
+      });
+    }
+
     // Auto-install VS Code/Cursor terminal-focus extension
     try { installTerminalFocusExtension(); } catch (err) {
       console.warn("Clawd: failed to auto-install terminal-focus extension:", err.message);
@@ -3849,6 +4191,229 @@ if (!gotTheLock) {
     // and startUpdateScheduler() short-circuits on !app.isPackaged.
     try { reconcilePendingOnStartup(); } catch (err) { updateLog(`reconcile failed: ${err && err.message}`); }
     try { startUpdateScheduler(); } catch (err) { updateLog(`scheduler start failed: ${err && err.message}`); }
+
+    // Start Attention Tracking (v2: gates/policy wired from prefs)
+    const { BrowserScan } = require("./attention-browser-scan");
+    const _attPrefs = (_initialPrefsLoad && _initialPrefsLoad.snapshot) || {};
+
+    // Second, independent llama-server for MiniCPM-V 4.6 (vision). Cold-started
+    // on the first ambiguous event, auto-shut-down when idle (plan §2.1/§3.9).
+    let _visionModelDir = null;
+    try {
+      const _chat = _minicpmChat;
+      if (_chat && typeof _chat.getDefaultModelDir === "function") _visionModelDir = _chat.getDefaultModelDir();
+    } catch {}
+    const visionManager = new VisionSidecarManager({ appRoot: __dirname, modelDir: _visionModelDir });
+    visionManager.cleanupOrphans();
+    updateLog(`vision sidecar availability: ${JSON.stringify(visionManager.availabilityReport())}`);
+
+    let _attInstance = null;
+    // Live consent flags — kept in sync with the persisted prefs so a consent
+    // granted in onboarding or toggled in Settings takes effect immediately
+    // without an app restart (plan §2 consent step).
+    const _attConsent = {
+      accessibility: !!_attPrefs.attentionAccessibilityConsent,
+    };
+    const parseDomHint = (domHint) => {
+      if (!domHint) return null;
+      try { return JSON.parse(domHint); } catch { return null; }
+    };
+    // Plan §2 step 3 — accessibility/DOM pull. The browser bridge sends
+    // media-session + heading hints + a page-text snippet (event.domHint /
+    // event.domSnippet / event.mediaSession / event.videoPlaying); use them
+    // to resolve ambiguity before the screenshot.
+    //
+    // The OS accessibility tree (AXUIElement / UI Automation / AT-SPI2) is a
+    // pluggable slot: implement osAccessibilityResolve() with a native a11y
+    // module and it is consulted next. It only runs once the user has granted
+    // OS-accessibility consent (plan §2 consent), and returns null otherwise.
+    async function osAccessibilityResolve(event, hyp) {
+      if (!_attConsent.accessibility) return null;
+      // TODO(native): read the focused UI element's role/name via the OS a11y
+      // API and return "SAME_TASK" / "TASK_SWITCH_CONFIDENT" / null. Requires a
+      // native dependency + the user granting Accessibility/UI Automation
+      // permission (prompted during onboarding).
+      return null;
+    }
+    const accessibilityPull = async (event, hyp) => {
+      if (!event) return null;
+      // Quick, fact-based decisions from the DOM signals — no model call.
+      const h = String(hyp || "").toLowerCase();
+      const hint = parseDomHint(event.domHint);
+      const media = (hint && hint.media) || (event.mediaSession && (event.mediaSession.title || event.mediaSession.artist)) || "";
+      const playing = event.videoPlaying === true ||
+        (event.mediaSession && event.mediaSession.playbackState === "playing");
+      // A window genuinely playing media while our task is "watch a video" is
+      // clearly still on-task.
+      if (playing && (h.includes("video") || h.includes("watch") || h.includes("movie"))) {
+        return "SAME_TASK";
+      }
+      // A media window playing while we're coding/writing is a strong
+      // distraction signal — but only when we actually know it's playing
+      // (we don't want to flag a paused YouTube tab).
+      if (playing && (h.includes("code") || h.includes("work") || h.includes("task") || h.includes("develop") || h.includes("write"))) {
+        return "TASK_SWITCH_CONFIDENT";
+      }
+      return osAccessibilityResolve(event, hyp);
+    };
+    // Plan §2 step 4 — vision tool (MiniCPM-V 4.6). True last resort.
+    const visionClassify = async (event, hyp) => {
+      if (!visionManager.isAvailable()) return null;
+      const ready = await visionManager.ensureReady();
+      if (!ready) return null;
+      try {
+        const res = await attentionVisionClient.performVisionCheck(event, hyp || "", visionManager.url);
+        visionManager.touch();
+        return res ? res.classification : null;
+      } catch (e) {
+        console.warn("[main] vision classify failed:", e && e.message);
+        return null;
+      }
+    };
+
+    _attInstance = attentionStateManager.startAttentionTracking("http://127.0.0.1:18765", {
+      policyConfig: {
+        enabled: _attPrefs.attentionEnabled !== false,
+        idleEnabled: _attPrefs.attentionIdleEnabled !== false,
+        idleMs: (_attPrefs.attentionIdleMinutes || 2) * 60000,
+        dwellMs: _attPrefs.attentionDwellMs || 4000,
+        privacyList: _attPrefs.attentionPrivacyList || "",
+        visionEnabled: !!_attPrefs.attentionVisionEnabled && !!_attPrefs.attentionVisionConsent,
+      },
+      confirmHandler: (payload) => _minicpmChat.askConfirmation(payload),
+      messageHandler: (text) => _minicpmChat.showMessage(text),
+      distractionThresholdMs: (_attPrefs.attentionDistractionMinutes || 5) * 60000,
+      // §3.8 / §4 observer-feature hydration
+      contract: _attPrefs.attentionNudgeContract || "",
+      wanderBudgetMin: _attPrefs.attentionWanderBudgetMinutes || 0,
+      checkInEnabled: _attPrefs.attentionCheckInEnabled !== false,
+      stuckEnabled: !!_attPrefs.attentionStuckEnabled,
+      recapEnabled: _attPrefs.attentionRecapEnabled !== false,
+      patternsEnabled: !!_attPrefs.attentionPatternsEnabled,
+      accessibilityPull,
+      visionClassify,
+      // v3 memory: feed the unified store from the attention decision layer.
+      memoryService: _memoryService,
+      getPrefs: (k) => _settingsController.get(k),
+      // "Help me get back" button → jump to the active session's terminal.
+      refocusHandler: () => {
+        try {
+          const snap = _state && typeof _state.buildSessionSnapshot === "function"
+            ? _state.buildSessionSnapshot() : null;
+          const sessions = (snap && Array.isArray(snap.sessions) ? snap.sessions : []);
+          const active = sessions.find(
+            (s) => s && s.badge !== "done" && s.state && s.state !== "idle" && s.state !== "sleeping"
+          );
+          if (active && active.id) {
+            focusDashboardSession(active.id, { requestSource: "attention-refocus" });
+            return "your terminal";
+          }
+        } catch (e) {}
+        return null;
+      },
+    });
+
+    // Keep consent-driven gating live: a toggle in Settings (or a consent
+    // granted during onboarding) updates the running policy immediately.
+    try {
+      if (_settingsController && typeof _settingsController.subscribeKey === "function") {
+        _settingsController.subscribeKey("attentionVisionConsent", (val) => {
+          if (_attInstance) {
+            _attInstance.policy.visionEnabled =
+              !!_settingsController.get("attentionVisionEnabled") && !!val;
+          }
+        });
+        _settingsController.subscribeKey("attentionAccessibilityConsent", (val) => {
+          _attConsent.accessibility = !!val;
+        });
+        // Live toggle for the vision sidecar: enabling it (with consent
+        // granted) brings the dedicated vision llama-server up so the next
+        // ambiguous event can use it without a cold-start; disabling it tears
+        // the sidecar down immediately.
+        _settingsController.subscribeKey("attentionVisionEnabled", (val) => {
+          if (!_attInstance) return;
+          const enabled = !!val && !!_settingsController.get("attentionVisionConsent");
+          _attInstance.policy.visionEnabled = enabled;
+          if (enabled) {
+            if (visionManager.isAvailable()) {
+              visionManager.ensureReady().catch(() => {});
+            }
+          } else {
+            try { visionManager.stop(); } catch {}
+          }
+        });
+      }
+    } catch (err) { console.warn("[main] consent subscription failed:", err && err.message); }
+
+    // Expose the decision layer so hook handlers (git commit/PR, AI-tool
+    // prompts, file reads/writes) can feed completion + stuck-detection signals.
+    const _attDecision = require("./attention-decision").getAttentionDecision();
+    global.__attentionDecision = _attDecision;
+
+    // v3 memory: video transcript summarizer — hook the attention event bus so
+    // a playing <video> triggers a transcript fetch/summarize cycle (plan §6).
+    try {
+      const { bus } = require("./attention-event-bus");
+      let _lastVideoKey = null;
+      bus.on("focus", (ev) => {
+        if (!_memoryService || _settingsController.get("memoryEnabled") !== true) return;
+        if (_settingsController.get("memoryVideoEnabled") !== true) return;
+        if (ev && typeof ev.videoPlaying === "boolean") {
+          const key = ev.url || ev.title || "video";
+          if (ev.videoPlaying) {
+            if (key !== _lastVideoKey) { _lastVideoKey = key; _memoryService.videoStart(key).catch(() => {}); }
+          } else if (_lastVideoKey) {
+            _lastVideoKey = null;
+            // On video end, summarize + store, then surface an interesting
+            // fact from the video in the chat bubble (user feature).
+            _memoryService.videoEnd().then((res) => {
+              if (res && res.summary && _minicpmChat && typeof _minicpmChat.showMessage === "function") {
+                _minicpmChat.showMessage(`Here's an interesting tidbit from that video: ${res.summary}`);
+              }
+            }).catch(() => {});
+          }
+        }
+      });
+    } catch (e) { console.warn("[main] video memory bus hook failed:", e && e.message); }
+
+    // Keep the memory goal in sync when the nudge contract changes at runtime.
+    try {
+      if (_settingsController && typeof _settingsController.subscribeKey === "function") {
+        _settingsController.subscribeKey("attentionNudgeContract", (val) => {
+          if (_attDecision && typeof _attDecision.setContract === "function") {
+            _attDecision.setContract(val || "");
+          }
+        });
+        // Keep world-research topics live when edited in Settings.
+        _settingsController.subscribeKey("memoryWorldTopics", (val) => {
+          if (_memoryService && typeof _memoryService.setResearchTopics === "function") {
+            _memoryService.setResearchTopics(Array.isArray(val) ? val : []);
+          }
+        });
+        // Keep the AI-news RSS feed URL live when edited in Settings.
+        _settingsController.subscribeKey("memoryWorldRssUrl", (val) => {
+          if (_memoryService && typeof _memoryService.setRssUrl === "function") {
+            _memoryService.setRssUrl(typeof val === "string" ? val : "");
+          }
+        });
+        // Live start/stop of the always-on backend when the Enabled toggle is
+        // flipped in Settings (so it takes effect immediately, no restart).
+        _settingsController.subscribeKey("memoryEnabled", (val) => {
+          if (!_memoryService) return;
+          const on = val === true;
+          if (on && typeof _memoryService.start === "function") {
+            _memoryService.start().then((r) => {
+              if (r && r.started) console.log("Clawd: memory service started (mode:", r.mode, ")");
+            }).catch((err) => console.warn("Clawd: memory service failed to start:", err && err.message));
+          } else if (!on && typeof _memoryService.stop === "function") {
+            try { _memoryService.stop(); } catch (_) {}
+          }
+        });
+      }
+    } catch (e) { console.warn("[main] contract sync failed:", e && e.message); }
+
+    // Tear down the vision sidecar (second llama-server) on quit.
+    app.on("before-quit", () => { try { visionManager.stop(); } catch {} });
   });
 
   app.on("before-quit", () => {
@@ -3878,10 +4443,14 @@ if (!gotTheLock) {
     topmostRuntime.cleanup();
     themeRuntime.cleanup();
     _focus.cleanup();
+    attentionStateManager.stopAttentionTracking();
     if (animationOverridesMain) animationOverridesMain.cleanup();
     try { _remoteSshIpc.dispose(); } catch {}
     try { _remoteSshRuntime.cleanup(); } catch {}
     try { if (_minicpmChat && typeof _minicpmChat.shutdown === "function") _minicpmChat.shutdown(); } catch {}
+    if (_memoryService && typeof _memoryService.stop === "function") {
+      try { _memoryService.stop(); } catch {}
+    }
     if (hitWin && !hitWin.isDestroyed()) hitWin.destroy();
   });
 

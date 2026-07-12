@@ -24,6 +24,8 @@ describe("state-priority constants", () => {
       notification: 7,
       sweeping: 6,
       attention: 5,
+      "asking-confirmation": 5,
+      distracted: 4,
       carrying: 4,
       juggling: 4,
       working: 3,
@@ -33,7 +35,7 @@ describe("state-priority constants", () => {
       sleeping: 0,
     });
     assert.deepStrictEqual([...SLEEP_SEQUENCE], ["yawning", "dozing", "collapsing", "sleeping", "waking"]);
-    assert.deepStrictEqual([...ONESHOT_STATES], ["attention", "error", "sweeping", "notification", "carrying"]);
+    assert.deepStrictEqual([...ONESHOT_STATES], ["attention", "asking-confirmation", "error", "sweeping", "notification", "carrying"]);
     assert.strictEqual(Object.isFrozen(STATE_PRIORITY), true);
     assert.strictEqual(getStatePriority("working"), 3);
     assert.strictEqual(getStatePriority("unknown"), 0);

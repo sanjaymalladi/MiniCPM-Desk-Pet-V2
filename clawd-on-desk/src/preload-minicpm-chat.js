@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("minicpm", {
   // Sidecar lifecycle
   start: (opts) => ipcRenderer.invoke("minicpm:start", opts),
   status: () => ipcRenderer.invoke("minicpm:status"),
+  getAttentionSummary: () => ipcRenderer.invoke("minicpm:get-attention-summary"),
 
   // Bubble window controls
   resize: (width, height) => ipcRenderer.invoke("minicpm:resize", { width, height }),
@@ -30,6 +31,16 @@ contextBridge.exposeInMainWorld("minicpm", {
 
   // i18n: initial fetch + live updates
   getI18n: () => ipcRenderer.invoke("minicpm:get-i18n"),
+
+  // v3 memory: RAG retrieval + tool-call surface for the chat.
+  memorySearch: (query) => ipcRenderer.invoke("minicpm:memory-search", { query }),
+  memoryRemember: (content, category) => ipcRenderer.invoke("minicpm:memory-remember", { content, category }),
+
+  // v3 memory tools exposed to the model (plan §3 / user feature set):
+  getTranscript: () => ipcRenderer.invoke("minicpm:get-transcript"),
+  launchJupyter: () => ipcRenderer.invoke("minicpm:launch-jupyter"),
+  goalCountdown: () => ipcRenderer.invoke("minicpm:goal-countdown"),
+  listSessions: () => ipcRenderer.invoke("minicpm:list-sessions"),
   onLangChange: (cb) => {
     const listener = (_e, payload) => { try { cb(payload || {}); } catch {} };
     ipcRenderer.on("minicpm:lang-change", listener);
@@ -46,4 +57,8 @@ contextBridge.exposeInMainWorld("minicpm", {
   onNarrate:        (cb) => ipcRenderer.on("minicpm:narrate",             (_e, p) => cb(p || {})),
   onCmdReply:       (cb) => ipcRenderer.on("minicpm:cmd-reply",           (_e, p) => cb(p || {})),
   onEditMode:       (cb) => ipcRenderer.on("minicpm:edit-mode",           (_e, p) => cb(p || {})),
+
+  // Custom Confirmation UI
+  onAskConfirmation: (cb) => ipcRenderer.on("minicpm:ask-confirmation",   (_e, p) => cb(p || {})),
+  replyConfirmation: (id, responseIndex) => ipcRenderer.send("minicpm:reply-confirmation", id, responseIndex),
 });

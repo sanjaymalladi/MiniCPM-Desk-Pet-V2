@@ -3928,3 +3928,28 @@ html, body {
 .mobile-action-btn:hover { background: var(--accent); color: #fff; }
 .mobile-action-danger { border-color: var(--red, #7f1d1d); color: var(--red, #fca5a5); }
 .mobile-action-danger:hover { background: var(--red, #7f1d1d); color: #fff; }
+
+/* ── Attention: vision + privacy controls ───────────────────────────── */
+.btn-attention-action {
+  background: var(--accent, #6366f1);
+  border: 1px solid var(--accent, #6366f1);
+  border-radius: 6px;
+  padding: 5px 12px;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-attention-action:disabled { opacity: 0.6; cursor: default; }
+.att-vision-status { margin-left: 8px; font-size: 12px; }
+.att-browser-list { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.att-browser-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+.att-browser-name { font-weight: 600; min-width: 80px; }

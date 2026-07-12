@@ -443,3 +443,48 @@ kbd {
   border-bottom-width: 2px;
 }
 em { font-style: normal; font-weight: 600; color: var(--text); }
+
+/* ── Step 2.5: extensions + consent ─────────────────────────────────── */
+.browser-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.browser-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius, 10px);
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+.browser-name { font-weight: 600; min-width: 90px; }
+.browser-installed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim, #9aa);
+  margin-left: auto;
+}
+.consent-block {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border, rgba(255,255,255,0.08));
+}
+.consent-block h2 { font-size: 15px; margin: 0 0 4px; }
+.consent-block p { font-size: 13px; color: var(--text-dim, #9aa); margin: 0 0 10px; }
+.vision-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.consent-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  margin: 6px 0;
+  cursor: pointer;
+}
+.consent-toggle input { margin-top: 3px; }

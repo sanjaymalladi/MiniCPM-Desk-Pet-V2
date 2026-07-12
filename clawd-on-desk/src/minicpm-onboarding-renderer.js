@@ -13,7 +13,7 @@
 // process via `window.onboarding.getI18n()` and refreshed live on
 // `onboarding:lang-change`.
 
-const STEPS = ["env-check", "model", "ready"];
+const STEPS = ["env-check", "model", "extensions", "ready"];
 
 const el = (id) => document.getElementById(id);
 const $ = (sel) => document.querySelector(sel);
@@ -31,6 +31,18 @@ let warmupStatus = "idle";   // "idle" | "running" | "ready" | "error"
 let warmupKicked = false;    // guard against double-firing warmup
 let envCheckRan = false;     // re-paint env-check details on lang change
 let downloadFailed = false;  // show an explicit retry affordance after failure
+let visionStatus = "idle";    // "idle" | "downloading" | "ready"
+let browserPlan = [];         // per-browser extension-install plan from the scan
+
+const BROWSER_LABELS = {
+  chrome: "Chrome", edge: "Edge", firefox: "Firefox", brave: "Brave",
+  opera: "Opera", arc: "Arc", vivaldi: "Vivaldi", chromium: "Chromium",
+  safari: "Safari", tor: "Tor Browser",
+};
+const CHROMIUM_BROWSERS = ["chrome", "edge", "brave", "opera", "arc", "vivaldi", "chromium"];
+function browserName(id) {
+  return BROWSER_LABELS[String(id || "").toLowerCase()] || String(id || "");
+}
 
 // Apply translations to all `data-i18n` elements. Called once on boot
 // and again on every language change.
@@ -377,6 +389,108 @@ async function runWarmupInline() {
   updateNextBtn();
 }
 
+// ── Step 2.5: extensions + consent (plan §2 vision + §3.1 multi-browser) ──
+async function runExtensionScan() {
+  browserPlan = [];
+  const list = el("ext-browser-list");
+  if (list) list.innerHTML = "";
+  let result = null;
+  try {
+    result = await window.onboarding.detectBrowsers();
+  } catch (err) {
+    result = { ok: false, plan: [] };
+  }
+  browserPlan = (result && result.plan) || [];
+  paintExtensionList();
+}
+
+function paintExtensionList() {
+  const list = el("ext-browser-list");
+  const none = el("ext-browser-none");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!browserPlan.length) {
+    if (none) none.classList.remove("hidden");
+    return;
+  }
+  if (none) none.classList.add("hidden");
+  for (const entry of browserPlan) {
+    const id = entry.browser;
+    const lower = String(id).toLowerCase();
+    const li = document.createElement("li");
+    li.className = "browser-item";
+
+    const label = document.createElement("span");
+    label.className = "browser-name";
+    label.textContent = browserName(id);
+    li.appendChild(label);
+
+    if (CHROMIUM_BROWSERS.includes(lower) || lower === "firefox") {
+      const btn = document.createElement("button");
+      btn.className = "btn ghost";
+      btn.textContent = t("onboardingExtensionsReveal");
+      btn.addEventListener("click", () => {
+        btn.disabled = true;
+        window.onboarding.openExtensionFolder(id).catch(() => {}).finally(() => { btn.disabled = false; });
+      });
+      li.appendChild(btn);
+
+      const chk = document.createElement("label");
+      chk.className = "browser-installed";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = false;
+      const txt = document.createElement("span");
+      txt.textContent = t("onboardingExtensionsInstalled");
+      chk.appendChild(cb);
+      chk.appendChild(txt);
+      li.appendChild(chk);
+    } else {
+      const note = document.createElement("span");
+      note.className = "dim";
+      note.textContent = t("onboardingExtensionsNotSupported");
+      li.appendChild(note);
+    }
+    list.appendChild(li);
+  }
+}
+
+async function startVisionDownload() {
+  if (visionStatus === "downloading" || visionStatus === "ready") return;
+  visionStatus = "downloading";
+  const btn = el("ext-vision-btn");
+  const status = el("ext-vision-status");
+  if (btn) { btn.disabled = true; btn.textContent = t("onboardingVisionDownloading"); }
+  if (status) status.textContent = "";
+
+  const unsub = window.onboarding.onProgress((p) => {
+    if (!p || p.event !== "vision-download") return;
+    if (p.phase === "transfer" && p.bytes_total) {
+      const pct = ((p.bytes_done || 0) / p.bytes_total) * 100;
+      if (status) status.textContent = `${Math.round(pct)}%${p.file ? "  ·  " + p.file : ""}`;
+    } else if (p.phase === "complete" || p.phase === "reloaded") {
+      if (status) status.textContent = t("onboardingVisionReady");
+    } else if (p.phase === "error") {
+      if (status) status.textContent = p.message || "error";
+    }
+  });
+
+  const r = await window.onboarding.startVisionModelDownload();
+  if (unsub) unsub();
+
+  if (r && r.ok) {
+    visionStatus = "ready";
+    if (btn) btn.textContent = t("onboardingVisionReady");
+    if (status) status.textContent = t("onboardingVisionReady");
+  } else {
+    visionStatus = "idle";
+    if (btn) { btn.disabled = false; btn.textContent = t("onboardingVisionDownload"); }
+    // Failure is reported through the progress event's "error" phase above;
+    // only fall back here when that event never fired (e.g. an immediate reject).
+    if (status && !status.textContent) status.textContent = (r && r.error) || t("onboardingVisionSkip");
+  }
+}
+
 // ── Live language change ──────────────────────────────────────────────
 function applyLang(lang) {
   if (typeof lang !== "string" || !lang) return;
@@ -388,6 +502,9 @@ function applyLang(lang) {
   }
   if (currentStep === "model") {
     paintModelPanel();
+  }
+  if (currentStep === "extensions") {
+    paintExtensionList();
   }
 }
 
@@ -428,11 +545,20 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   el("model-next").addEventListener("click", () => {
+    show("extensions");
+    void runExtensionScan();
+  });
+
+  el("extensions-next").addEventListener("click", () => {
     show("ready");
   });
 
+  el("ext-vision-btn").addEventListener("click", () => { void startVisionDownload(); });
+
   el("ready-finish").addEventListener("click", async () => {
-    await window.onboarding.complete();
+    const visionConsent = el("ext-consent-vision") ? el("ext-consent-vision").checked : true;
+    const accessibilityConsent = el("ext-consent-a11y") ? el("ext-consent-a11y").checked : true;
+    await window.onboarding.complete({ visionConsent, accessibilityConsent });
   });
 
   $$("[data-back]").forEach((b) => {

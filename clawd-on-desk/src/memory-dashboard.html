@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Supermemory</title>
+<style>
+  /* Geist Pixel (plan §0): vendored locally for local-first operation.
+     Drop the woff2 at assets/fonts/geist-pixel/ — if absent, the stack
+     falls back to the system Geist/Inter/monospace fonts. */
+  @font-face {
+    font-family: "Geist Pixel";
+    src: url("../assets/fonts/geist-pixel/GeistPixel-Regular.woff2") format("woff2");
+    font-weight: 400;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "Geist Pixel";
+    src: url("../assets/fonts/geist-pixel/GeistPixel-Medium.woff2") format("woff2");
+    font-weight: 500 700;
+    font-display: swap;
+  }
+  :root {
+    --blue: #0562EF;
+    --blue-soft: #e6efff;
+    --blue-line: #cfe0ff;
+    --ink: #0b1220;
+    --ink-2: #41506b;
+    --ink-3: #8a97ad;
+    --paper: #ffffff;
+    --paper-2: #f4f7ff;
+    --line: #e3e9f4;
+    --ok: #16a34a;
+    --radius: 14px;
+    --mono: "Geist Pixel", "Geist Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+    --sans: "Geist Pixel", "Geist", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #eaf1ff; --ink-2: #aab8d4; --ink-3: #6c7a96;
+      --paper: #121b2e; --paper-2: #0f1828; --line: #233148;
+      --blue-soft: #11254a; --blue-line: #1c3a6e; --paper-2b: #0b1220;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background-color: var(--paper-2);
+    background-image: radial-gradient(var(--blue-line) 1px, transparent 1px);
+    background-size: 22px 22px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .eyebrow {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 11px;
+    color: var(--blue);
+    font-weight: 600;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 22px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--paper);
+  }
+  header .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--blue); display: grid; place-items: center;
+    color: #fff; font-family: var(--mono); font-weight: 700; font-size: 15px;
+  }
+  header h1 { font-size: 17px; margin: 2px 0 0; font-weight: 700; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+    padding: 4px 9px; border-radius: 999px; letter-spacing: 0.08em;
+    border: 1px solid var(--blue-line); color: var(--ink-2); background: var(--blue-soft);
+  }
+  .pill.on { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .pill.off { background: transparent; color: var(--ink-3); }
+
+  .body { flex: 1; display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; padding: 16px 22px 22px; min-height: 0; }
+  @media (max-width: 720px) { .body { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  }
+  .card h2 { font-size: 13px; margin: 0; padding: 14px 16px 10px; font-weight: 700; }
+  .card .pad { padding: 0 16px 14px; }
+
+  .graphwrap { position: relative; flex: 1; min-height: 0; }
+  svg.graph { width: 100%; height: 100%; display: block; }
+  .node circle { fill: var(--paper); stroke: var(--blue); stroke-width: 1.5; }
+  .node.hub circle { fill: var(--blue); stroke: var(--blue); }
+  .node text { font-family: var(--mono); font-size: 10px; fill: var(--ink-2); }
+  .edge { stroke: var(--blue-line); stroke-width: 1; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 16px 12px; }
+  .toggle {
+    display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+    font-size: 12px; color: var(--ink-2);
+  }
+  .switch { width: 34px; height: 19px; border-radius: 999px; background: var(--line); position: relative; transition: background .15s; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+  .toggle.on .switch { background: var(--blue); }
+  .toggle.on .switch::after { left: 17px; }
+
+  .tabs { display: flex; gap: 6px; padding: 0 16px 10px; }
+  .tab { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--line); color: var(--ink-2); cursor: pointer; }
+  .tab.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+  .addrow { display: flex; gap: 8px; padding: 0 16px 12px; }
+  .addrow input, .addrow select, .search input {
+    font-family: var(--sans); font-size: 13px; padding: 8px 10px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--paper-2); color: var(--ink); outline: none;
+  }
+  .addrow input { flex: 1; }
+  .btn { background: var(--blue); color: #fff; border: 0; border-radius: 9px; padding: 8px 14px; font-weight: 600; font-size: 13px; cursor: pointer; }
+  .btn.ghost { background: transparent; color: var(--ink-2); border: 1px solid var(--line); }
+
+  .search { padding: 0 16px 10px; }
+  .search input { width: 100%; }
+
+  .list { flex: 1; overflow: auto; padding: 0 16px 16px; }
+  .item { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; margin-bottom: 8px; background: var(--paper-2); }
+  .item .txt { font-size: 13px; line-height: 1.4; word-break: break-word; }
+  .item .meta { font-family: var(--mono); font-size: 10px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; margin-top: 5px; display: flex; justify-content: space-between; align-items: center; }
+  .item .del { cursor: pointer; color: var(--ink-3); border: 0; background: none; font-size: 12px; }
+  .item .del:hover { color: #dc2626; }
+  .empty { color: var(--ink-3); font-size: 12px; text-align: center; padding: 24px 0; }
+  .banner { font-size: 12px; padding: 8px 12px; border-radius: 9px; margin: 0 16px 10px; }
+  .banner.warn { background: #fff7e6; color: #8a5a00; border: 1px solid #ffe2a8; }
+  @media (prefers-color-scheme: dark) { .banner.warn { background: #2a230f; color: #ffd98a; border-color: #4a3c12; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <div class="logo">M</div>
+      <div>
+        <div class="eyebrow">Supermemory</div>
+        <h1>Memory</h1>
+      </div>
+    </div>
+    <div id="status" class="pill off">off</div>
+  </header>
+
+  <div class="body">
+    <!-- LEFT: graph + controls -->
+    <section class="card">
+      <h2>Knowledge graph</h2>
+      <div class="controls" id="controls">
+        <label class="toggle" data-key="memoryEnabled"><span class="switch"></span> Enabled</label>
+        <label class="toggle" data-key="memoryMuted"><span class="switch"></span> Mute</label>
+        <label class="toggle" data-key="memoryWorldEnabled"><span class="switch"></span> World research</label>
+        <label class="toggle" data-key="memoryProactiveEnabled"><span class="switch"></span> Proactive</label>
+      </div>
+      <div class="graphwrap"><svg class="graph" id="graph" preserveAspectRatio="xMidYMid meet"></svg></div>
+    </section>
+
+    <!-- RIGHT: add + tabs + list -->
+    <section class="card">
+      <h2>Memories</h2>
+      <div id="warn"></div>
+      <div class="addrow">
+        <input id="addInput" placeholder="Remember something…" />
+        <select id="addCat">
+          <option value="personal">personal</option>
+          <option value="world-knowledge">world</option>
+        </select>
+        <button class="btn" id="addBtn">Add</button>
+      </div>
+      <div class="tabs">
+        <div class="tab active" data-cat="personal">Personal</div>
+        <div class="tab" data-cat="world-knowledge">World</div>
+        <div class="tab" data-cat="">Search</div>
+      </div>
+      <div class="search" id="searchRow" style="display:none">
+        <input id="searchInput" placeholder="Search all memories…" />
+      </div>
+      <div class="list" id="list"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let state = { active: "personal" };
+
+async function refreshState() {
+  const s = await window.memoryAPI.getState();
+  const pill = $("#status");
+  pill.className = "pill " + (s.ready ? "on" : "off");
+  pill.textContent = s.ready ? s.mode || "on" : "off";
+  for (const el of document.querySelectorAll(".toggle")) {
+    const key = el.dataset.key;
+    const on = !!s.prefs[key];
+    el.classList.toggle("on", on);
+  }
+  if (!s.ready) {
+    $("#warn").innerHTML = '<div class="banner warn">Memory backend is off. Enable it above to start the always-on sidecar.</div>';
+  } else {
+    $("#warn").innerHTML = "";
+  }
+}
+
+async function refreshGraph() {
+  const g = await window.memoryAPI.getGraph();
+  drawGraph(g);
+}
+
+function drawGraph(g) {
+  const svg = $("#graph");
+  svg.innerHTML = "";
+  const nodes = g.nodes || [];
+  const edges = g.edges || [];
+  if (!nodes.length) {
+    const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", "50%"); t.setAttribute("y", "50%");
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("fill", "var(--ink-3)");
+    t.setAttribute("font-size", "12"); t.textContent = "No memories yet";
+    svg.appendChild(t);
+    return;
+  }
+  const W = svg.clientWidth || 400, H = svg.clientHeight || 400;
+  const hubs = nodes.filter((n) => n.kind === "hub");
+  const leaves = nodes.filter((n) => n.kind !== "hub");
+  const pos = {};
+  const place = (n, cx, cy, r) => {
+    pos[n.id] = { x: cx + (Math.random() - 0.5) * r, y: cy + (Math.random() - 0.5) * r };
+  };
+  hubs.forEach((h, i) => place(h, W / 2 + (i - (hubs.length - 1) / 2) * 120, H / 2, 40));
+  leaves.forEach((l, i) => {
+    const hub = edges.find((e) => e.target === l.id);
+    const c = hub ? pos[hub.source] : { x: W / 2, y: H / 2 };
+    const ang = (i / Math.max(1, leaves.length)) * Math.PI * 2;
+    const rr = Math.min(W, H) * 0.36;
+    pos[l.id] = { x: c.x + Math.cos(ang) * rr, y: c.y + Math.sin(ang) * rr };
+  });
+  for (const e of edges) {
+    if (!pos[e.source] || !pos[e.target]) continue;
+    const ln = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    ln.setAttribute("class", "edge");
+    ln.setAttribute("x1", pos[e.source].x); ln.setAttribute("y1", pos[e.source].y);
+    ln.setAttribute("x2", pos[e.target].x); ln.setAttribute("y2", pos[e.target].y);
+    svg.appendChild(ln);
+  }
+  for (const n of nodes) {
+    const p = pos[n.id]; if (!p) continue;
+    const g2 = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g2.setAttribute("class", "node " + (n.kind === "hub" ? "hub" : ""));
+    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", p.x); c.setAttribute("cy", p.y);
+    c.setAttribute("r", n.kind === "hub" ? 9 : 5);
+    g2.appendChild(c);
+    const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    txt.setAttribute("x", p.x + 11); txt.setAttribute("y", p.y + 3);
+    txt.textContent = n.label || n.id;
+    g2.appendChild(txt);
+    svg.appendChild(g2);
+  }
+}
+
+async function refreshList() {
+  const list = $("#list");
+  list.innerHTML = "";
+  let items = [];
+  let query = "";
+  if (state.active === "") {
+    query = $("#searchInput").value || "";
+    items = await window.memoryAPI.search(query, "");
+  } else {
+    items = await window.memoryAPI.search("", state.active);
+  }
+  if (!items.length) {
+    list.innerHTML = '<div class="empty">' + (state.active === "" ? "Type to search." : "Nothing stored yet.") + "</div>";
+    return;
+  }
+  for (const m of items) {
+    const div = document.createElement("div");
+    div.className = "item";
+    const txt = document.createElement("div");
+    txt.className = "txt";
+    txt.textContent = m.content || m.text || JSON.stringify(m).slice(0, 120);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const tag = document.createElement("span");
+    tag.textContent = (m.category || state.active || "memory") + (m.created_at ? " · " + m.created_at.slice(0, 10) : "");
+    const del = document.createElement("button");
+    del.className = "del"; del.textContent = "delete";
+    del.onclick = async () => { await window.memoryAPI.remove(m.id); refreshList(); refreshGraph(); };
+    meta.appendChild(tag); meta.appendChild(del);
+    div.appendChild(txt); div.appendChild(meta);
+    list.appendChild(div);
+  }
+}
+
+async function addMemory() {
+  const v = $("#addInput").value.trim();
+  if (!v) return;
+  const cat = $("#addCat").value;
+  const res = await window.memoryAPI.add(v, cat);
+  if (res && res.stored === false) {
+    $("#warn").innerHTML = '<div class="banner warn">Refused: that looks private and was not stored.</div>';
+  } else {
+    $("#warn").innerHTML = "";
+  }
+  $("#addInput").value = "";
+  refreshState(); refreshList(); refreshGraph();
+}
+
+// wiring
+document.querySelectorAll(".toggle").forEach((el) => {
+  el.onclick = async () => {
+    const key = el.dataset.key;
+    const on = !el.classList.contains("on");
+    await window.memoryAPI.setPref(key, on);
+    refreshState(); refreshGraph();
+  };
+});
+$("#addBtn").onclick = addMemory;
+$("#addInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addMemory(); });
+document.querySelectorAll(".tab").forEach((t) => {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    t.classList.add("active");
+    state.active = t.dataset.cat;
+    $("#searchRow").style.display = state.active === "" ? "block" : "none";
+    refreshList();
+  };
+});
+$("#searchInput").addEventListener("input", refreshList);
+
+refreshState(); refreshGraph(); refreshList();
+</script>
+</body>
+</html>

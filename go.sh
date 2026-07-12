@@ -198,6 +198,22 @@ fetch_adapters() {
   yellow "    ⚠ 适配器下载失败;桌宠可先用 Base 人格,稍后 npm run fetch:adapters 重试。"
 }
 
+ensure_supermemory() {
+  cyan "==> Memory 后端 (supermemory)..."
+  if command -v supermemory >/dev/null 2>&1; then
+    green "    ✓ supermemory 已在 PATH"
+    return 0
+  fi
+  yellow "    supermemory 未安装;尝试 npm -g 安装 (可离线跳过)..."
+  # Memory 已默认随桌宠一起启动;装不上只影响首次 npx 拉取的几秒延迟。
+  npm i -g supermemory 2>/dev/null || true
+  if command -v supermemory >/dev/null 2>&1; then
+    green "    ✓ supermemory 已安装"
+  else
+    yellow "    ⚠ 未安装 supermemory;桌宠会在首次需要时通过 npx 自动拉取。"
+  fi
+}
+
 start_pet() {
   cyan "==> 启动桌宠..."
   load_fnm_env
@@ -235,6 +251,7 @@ case "$cmd" in
     install_python_deps
     install_npm_deps
     fetch_adapters
+    ensure_supermemory
     green ""
     green "✅ 安装完成。下一步: ./go.sh start"
     ;;
@@ -248,12 +265,17 @@ case "$cmd" in
     fi
     ( cd "$SIDECAR_DIR" && ./scripts/fetch-llama-release.sh )
     ;;
+  fetch-vision)
+    check_environment
+    ( cd "$APP_DIR" && ./scripts/fetch-vision-model.sh )
+    ;;
   run|"")
     check_environment
     ensure_llama_server
     install_python_deps
     install_npm_deps
     fetch_adapters
+    ensure_supermemory
     start_pet
     ;;
   build)
@@ -272,7 +294,7 @@ case "$cmd" in
     ;;
   *)
     red "未知命令: $cmd"
-    red "用法: ./go.sh [doctor|setup|start|run|build|fetch-llama]"
+    red "用法: ./go.sh [doctor|setup|start|run|build|fetch-llama|fetch-vision]"
     exit 1
     ;;
 esac

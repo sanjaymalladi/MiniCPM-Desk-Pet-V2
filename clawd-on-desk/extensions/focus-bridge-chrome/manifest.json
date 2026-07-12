@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "MiniCPM Focus Bridge",
+  "version": "1.0.0",
+  "description": "Reports active browser tabs to MiniCPM Desk Pet's attention companion.",
+  "permissions": ["tabs", "storage", "alarms", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*", "*://*.youtube.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "MiniCPM Focus Bridge"
+  },
+  "icons": {
+    "16":  "icon16.png",
+    "48":  "icon48.png",
+    "128": "icon128.png"
+  }
+}

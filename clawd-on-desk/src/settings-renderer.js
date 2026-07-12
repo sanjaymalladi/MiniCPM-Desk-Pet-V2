@@ -4,6 +4,8 @@ const core = globalThis.ClawdSettingsCore;
 
 const SIDEBAR_TABS = [
   { id: "general", labelKey: "sidebarGeneral", available: true },
+  { id: "attention", labelKey: "sidebarAttention", label: "Attention", available: true },
+  { id: "memory", labelKey: "sidebarMemory", label: "Memory", available: true },
   { id: "minicpm", labelKey: "sidebarMinicpm", available: true },
   { id: "agents", labelKey: "sidebarAgents", available: true },
   { id: "theme", labelKey: "sidebarTheme", available: true },
@@ -80,6 +82,8 @@ core.ops.installRenderHooks({
 });
 
 globalThis.ClawdSettingsTabGeneral.init(core);
+globalThis.ClawdSettingsTabAttention.init(core);
+globalThis.ClawdSettingsTabMemory.init(core);
 globalThis.ClawdSettingsTabAgents.init(core);
 globalThis.ClawdSettingsTabTheme.init(core);
 globalThis.ClawdSettingsTabAnimMap.init(core);

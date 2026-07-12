@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniCPM Focus Bridge</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      width: 240px; padding: 16px; margin: 0;
+      background: #1a1a2e; color: #e0e0e0;
+    }
+    h2 { font-size: 14px; margin: 0 0 12px; color: #7eb8f7; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.connected { background: #4caf50; }
+    .dot.disconnected { background: #f44336; }
+    label { font-size: 11px; color: #aaa; display: block; margin-bottom: 4px; }
+    input {
+      width: 100%; box-sizing: border-box; padding: 6px 8px;
+      background: #252540; border: 1px solid #444; border-radius: 4px;
+      color: #e0e0e0; font-size: 12px;
+    }
+    button {
+      margin-top: 10px; width: 100%; padding: 7px;
+      background: #3a5bb5; border: none; border-radius: 4px;
+      color: #fff; font-size: 12px; cursor: pointer;
+    }
+    button:hover { background: #4a6bc5; }
+    .note { font-size: 10px; color: #888; margin-top: 10px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <h2>MiniCPM Focus Bridge</h2>
+  <div class="status">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">Checking…</span>
+  </div>
+
+  <label for="port-input">Hook server port</label>
+  <input type="number" id="port-input" min="1024" max="65535" value="23333">
+  <button id="save-btn">Save &amp; reconnect</button>
+
+  <p class="note">
+    This extension reports active tabs to the MiniCPM Desk Pet on your desktop.
+    The port must match Settings → Attention → Hook server port.
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

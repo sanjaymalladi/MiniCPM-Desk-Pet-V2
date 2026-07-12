@@ -530,6 +530,8 @@ class LlamaServer:
         stop: Optional[list[str]] = None,
         enable_thinking: bool = True,
         lora: Optional[list[dict]] = None,
+        response_format: Optional[dict] = None,
+        grammar: Optional[str] = None,
     ) -> AsyncIterator[tuple[str, str]]:
         """Yield ``(kind, text)`` tuples from llama-server's OpenAI stream.
 
@@ -574,6 +576,13 @@ class LlamaServer:
         # when adapters are pre-loaded.
         if lora is not None:
             body["lora"] = lora
+        # Structured output / JSON mode (llama.cpp b2963+).
+        # Pass through response_format for JSON-object mode and grammar for
+        # GBNF-constrained output. When both are provided, grammar takes priority.
+        if response_format is not None:
+            body["response_format"] = response_format
+        if grammar is not None:
+            body["grammar"] = grammar
 
         async with self._client.stream("POST", "/v1/chat/completions", json=body) as resp:
             if resp.status_code != 200:
@@ -624,5 +633,98 @@ class LlamaServer:
             "stream": False,
         }
         r = await self._client.post("/completion", json=body)
+        r.raise_for_status()
+        return r.json()
+
+
+class VisionLlamaServer(LlamaServer):
+    """Specialized LlamaServer for MiniCPM-V 4.6 with cold-start lifecycle.
+
+    Starts on-demand when vision_analyze() is called. Shuts down automatically
+    after 30 seconds of inactivity. Uses a separate PID file and port range
+    to coexist with the main text model.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_path: Optional[Path],
+        mmproj_path: Optional[Path],
+        ctx_size: int = 2048,
+        n_gpu_layers: int = -1,
+    ) -> None:
+        extra = ["--reasoning", "off"]
+        if mmproj_path:
+            extra.extend(["--mmproj", str(mmproj_path.expanduser().resolve())])
+
+        super().__init__(
+            model_path=model_path,
+            ctx_size=ctx_size,
+            n_gpu_layers=n_gpu_layers,
+            extra_args=extra,
+        )
+        # Separate pid file so orphan cleanup doesn't reap the main server
+        self._pid_file = self._pid_file.with_name("llama-server-vision.pid")
+        self._idle_timer: Optional[asyncio.TimerHandle] = None
+        self._idle_timeout = 45.0
+
+    def _find_vision_port(self) -> int:
+        for port in range(18801, 18831):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    async def start(self) -> None:
+        # Override start to use vision port range
+        if self.alive:
+            return
+        self.port = self._find_vision_port()
+        await super().start()
+
+    def _reset_idle_timer(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._idle_timer:
+            self._idle_timer.cancel()
+
+        async def shutdown() -> None:
+            get_logger().info("Vision sidecar idle for %.1fs, shutting down", self._idle_timeout)
+            await self.stop()
+
+        self._idle_timer = loop.call_later(self._idle_timeout, lambda: asyncio.create_task(shutdown()))
+
+    async def analyze_image(self, prompt: str, image_b64: str) -> dict:
+        """Analyze an image using the vision model."""
+        if not self.alive:
+            get_logger().info("Vision sidecar cold start")
+            await self.start()
+
+        self._reset_idle_timer()
+
+        if not self._client:
+            raise RuntimeError("Vision sidecar failed to start")
+
+        body = {
+            "model": "minicpm-v",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ],
+            "max_tokens": 64,
+            "temperature": 0.1,
+            "stream": False,
+        }
+
+        r = await self._client.post("/v1/chat/completions", json=body)
         r.raise_for_status()
         return r.json()

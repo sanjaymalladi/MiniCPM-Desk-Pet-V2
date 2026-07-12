@@ -197,11 +197,13 @@ function runMainTickOnce() {
       lastSpinTickAt = 0;
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
+      if (typeof ctx.onIdleEdge === "function") { try { ctx.onIdleEdge(true); } catch (e) {} }
     }
 
     if (!idleNow && idleWasActive) {
       if (idleLookReturnTimer) { clearTimeout(idleLookReturnTimer); idleLookReturnTimer = null; }
       if (yawnDelayTimer) { clearTimeout(yawnDelayTimer); yawnDelayTimer = null; }
+      if (typeof ctx.onIdleEdge === "function") { try { ctx.onIdleEdge(false); } catch (e) {} }
     }
     idleWasActive = idleNow;
 

@@ -99,6 +99,105 @@ The MiniCPM settings page lets you:
 
 The app includes a neko-style persona adapter. You can switch adapters or import your own from **Settings -> MiniCPM**.
 
+## Attention Companion (v2)
+
+The pet watches your focused window and uses MiniCPM to tell whether you're
+working or drifting off — then reacts with a pet bubble instead of a native
+dialog. The pipeline is a 4-step escalation ladder that stays cheap and
+private by default:
+
+1. **Hook / log signals** — coding-agent events and the browser tab-tracking
+   extension (title, URL, media-session, heading hints).
+2. **Accessibility / DOM pull** — when the text signal is ambiguous, the
+   bridge's `domHint` (media-session + heading) is used to resolve it before
+   any screenshot. (OS-level accessibility tree is a future backend.)
+3. **Re-evaluate** — if still ambiguous, the cheap gates below run.
+4. **Vision verification (MiniCPM-V 4.6)** — only as a true last resort, a
+   second on-demand llama-server screenshots *just the focused window* and
+   returns `on_task` / `distraction` / `unclear`. See
+   [Vision model setup](#vision-model-setup) — it needs an extra download.
+
+### Cheap front-line gates (always on)
+
+These reduce noise before any model call and are pure, unit-tested logic:
+
+- **Idle / AFK gate** — pause evaluation while you've been away
+  (`Pause when idle / AFK`).
+- **Privacy exclude-list** — never evaluate or capture windows whose
+  app/title/URL matches a substring (bank, 1password, incognito, …).
+- **Meeting / call category** — a valid task state, not a distraction.
+- **Focus-dwell debounce** — only judge after focus holds for a moment
+  (drops alt-tab flicker).
+- **App clustering** — editor ↔ terminal ↔ docs read as one task.
+- **Multi-browser same-task** — a video in one browser + notes in another
+  don't read as "switched away".
+
+### Observer features (Settings → Attention)
+
+| Setting | What it does |
+| --- | --- |
+| **Task check-in** | When a new task is detected, confirm it's right instead of assuming. Corrections are never logged as distraction. |
+| **Nudge contract** | Free text: what to hold you to this session. Anything clearly within it is *not* a distraction. |
+| **Wander budget** | Per-session tangent allowance (minutes). The pet tracks silently and only speaks up once it's spent. `0` = off. |
+| **Stuck detection** | If you repeat a question across tools or thrash files without a commit, the pet *offers help* (not a scold). |
+| **Session recap** | Tracks where time went and tells you exactly where you left off after a break. |
+| **Pattern surfacing** | Occasionally notes when you tend to drift (e.g. around 3pm). |
+| **Enable Vision Verification** | Turns on the MiniCPM-V screenshot step (requires the model below). |
+
+> **Prompt behavior:** the *Video Focus Mode* prompt shows at most once per
+> video session, and the *Focus Check* prompt will not re-ask within a 5-minute
+> cooldown after you dismiss it — so neither loops.
+
+### Vision model setup
+
+The vision classifier needs two files that are **not** bundled:
+
+- `MiniCPM-V-4_6-Q4_K_M.gguf`
+- `MiniCPM-V-4_6-mmproj-F16.gguf`
+
+Download them once (they're large) into `clawd-on-desk/models/` (dev) or the
+app's `userData/models/` folder:
+
+```bash
+# macOS / Linux
+./go.sh fetch-vision
+# or directly:
+cd clawd-on-desk && ./scripts/fetch-vision-model.sh
+
+# Windows (PowerShell)
+cd clawd-on-desk
+pwsh ./scripts/fetch-vision-model.ps1
+```
+
+Then enable **Settings → Attention → Enable Vision Verification (MiniCPM-V)**.
+The sidecar cold-starts on the first ambiguous event and shuts down when idle.
+Until these files are present, vision verification silently no-ops and the
+pipeline stops at step 3.
+
+### Remaining gaps (step-by-step)
+
+These pieces are scaffolded but need assets/permissions or hook wiring:
+
+- **OS accessibility tree (step 2):** implement per-OS AXUIElement
+  (macOS) / UI Automation (Windows) / AT-SPI2 (Linux) in
+  `src/attention-state-manager.js` `accessibilityPull`, returning
+  `SAME_TASK` / `TASK_SWITCH_CONFIDENT` from real element roles/text. The
+  browser-bridge `domHint` path is already wired.
+- **Stuck-detection & commit/PR completion signals (step 4 §3.10):** feed
+  agent events into the decision layer from your hook handlers, e.g.
+  `global.__attentionDecision.recordAgentActivity({ type: "query", tool: "claude", question })`
+  on `UserPromptSubmit`, `recordAgentActivity({ type: "write", path })` on
+  Edit/Write, `recordAgentActivity({ type: "commit" })` on a git commit, and
+  `recordTaskCompletion("pr")` when a PR opens. Today these seams exist but
+  aren't called from hooks.
+- **Per-browser onboarding prompt (§3.1):** `src/attention-browser-scan.js`
+  already detects installed browsers and builds a per-browser extension
+  install plan. Wire `BrowserScan.detectInstalled` + `buildInstallPlan` into
+  `src/minicpm-onboarding.js` to prompt once per browser (currently only a
+  single global extension prompt exists).
+- **Permission-based sharing (§4):** the honest recap is generated, but the
+  user-confirmed "share this summary with my pair" flow is not built yet.
+
 ## Roadmap
 
 - Broader Linux validation.

@@ -376,7 +376,9 @@ function renderEmpty() {
 
 function render(options = {}) {
   if (activeEdit && !options.force) return;
-  const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+  const sessions = Array.isArray(snapshot.sessions)
+    ? snapshot.sessions.filter((s) => s.badge !== "done")
+    : [];
   const count = sessions.length;
   titleEl.textContent = t("dashboardWindowTitle");
   countEl.textContent = t("dashboardCount").replace("{n}", count);

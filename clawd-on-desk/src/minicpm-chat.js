@@ -1298,6 +1298,7 @@ module.exports = function initMinicpmChat(ctx) {
   refreshActiveAdapterPath();
 
   let bubble = null;
+  let bubbleReady = false;
   let activeSide = "right";
   // Updated from /api/health after the sidecar comes online — drives the
   // narrator's voice (default vs neko etc.).
@@ -1711,6 +1712,11 @@ module.exports = function initMinicpmChat(ctx) {
       resizable: false,
       skipTaskbar: true,
       alwaysOnTop: true,
+      // Focusable so the chat <textarea> can receive keyboard input. The
+      // bubble is only opened on explicit user action (pet click / shortcut
+      // / menu), so taking focus then is expected. Passive narration still
+      // avoids stealing focus because showAsk()/focusWindow() only focus
+      // once the input is actually on screen.
       focusable: true,
       ...(isLinux ? { type: LINUX_WINDOW_TYPE } : {}),
       ...(isMac ? { type: "panel" } : {}),
@@ -1720,6 +1726,12 @@ module.exports = function initMinicpmChat(ctx) {
         nodeIntegration: false,
       },
     });
+
+    // Defer show() until the renderer has actually painted. On Windows a
+    // transparent window shown before first paint flashes the default
+    // (white / electron) background for a frame — the "logo" glitch.
+    bubbleReady = false;
+    bubble.once("ready-to-show", () => { bubbleReady = true; });
 
     if (isWin) bubble.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
     if (isMac) {
@@ -1758,8 +1770,19 @@ module.exports = function initMinicpmChat(ctx) {
         offsetDx: bubblePos.dx, offsetDy: bubblePos.dy,
       }));
     }
-    if (!bubble.isVisible()) bubble.show();
-    bubble.focus();
+    if (bubbleReady) {
+      if (!bubble.isVisible()) bubble.show();
+      bubble.focus();
+    } else {
+      // Renderer not painted yet — wait for ready-to-show so we don't flash
+      // the default (white / electron) background of a transparent window.
+      bubble.once("ready-to-show", () => {
+        if (bubble && !bubble.isDestroyed()) {
+          if (!bubble.isVisible()) bubble.show();
+          bubble.focus();
+        }
+      });
+    }
     bubbleShown = true;
     bubble.webContents.send("minicpm:cmd-open", { side: activeSide });
     // Fire a 1-token warmup so the model weights are paged back into RAM
@@ -1805,6 +1828,91 @@ module.exports = function initMinicpmChat(ctx) {
     // If the bubble doesn't exist yet, ensure it does so the listener attaches.
     ensureBubble();
     bubble.webContents.send("minicpm:cmd-toggle-thinking");
+  }
+
+  /**
+   * Show a confirmation prompt in the pet bubble and resolve with the
+   * chosen button index (or null on timeout/dismiss).
+   *
+   * Used by the Attention Companion so distraction / video-focus prompts
+   * appear in the always-on-top pet bubble (visible even over a fullscreen
+   * video) instead of a native dialog that hides behind the active window.
+   *
+   * @param {{id:string, title:string, message:string, buttons:string[]}} payload
+   * @returns {Promise<number|null>}
+   */
+  function askConfirmation(payload) {
+    if (!payload || !payload.id) return Promise.resolve(null);
+    const win = ensureBubble();
+    if (!win || win.isDestroyed()) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) { settled = true; resolve(null); }
+      }, 30000);
+
+      const send = () => {
+        const onceHandler = (_evt, id, idx) => {
+          if (id === payload.id && !settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(typeof idx === "number" ? idx : null);
+          }
+        };
+        ipcMain.once("minicpm:reply-confirmation", onceHandler);
+        try {
+          win.webContents.send("minicpm:ask-confirmation", payload);
+        } catch (err) {
+          if (!settled) { settled = true; clearTimeout(timer); resolve(null); }
+        }
+      };
+
+      // Optional pet lead-in line so the prompt reads as the pet talking
+      // (a 🐾 speech bubble) rather than a bare modal card. The card that
+      // follows carries the actual buttons.
+      if (payload.prelude) {
+        try {
+          win.webContents.send("minicpm:cmd-reply", { text: payload.prelude, ok: true });
+        } catch (err) {}
+        setTimeout(send, 700);
+      } else {
+        send();
+      }
+
+      // Wait until the renderer (and its onAskConfirmation listener) is ready
+      // before sending, otherwise the IPC is lost on a fresh bubble window.
+      if (win.webContents.isLoading()) {
+        win.webContents.once("did-finish-load", () => setTimeout(send, 120));
+      } else {
+        setTimeout(send, 80);
+      }
+    });
+  }
+
+  /**
+   * Show a one-line pet speech bubble (the 🐾 command-reply style) without
+   * any buttons. Used by the Attention Companion to acknowledge the user's
+   * choice after a confirmation.
+   *
+   * @param {string} text
+   * @returns {Promise<boolean>}
+   */
+  function showMessage(text) {
+    if (!text) return Promise.resolve(false);
+    const win = ensureBubble();
+    if (!win || win.isDestroyed()) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const emit = () => {
+        try { win.webContents.send("minicpm:cmd-reply", { text, ok: true }); } catch (err) {}
+        resolve(true);
+      };
+      if (win.webContents.isLoading()) {
+        win.webContents.once("did-finish-load", () => setTimeout(emit, 120));
+      } else {
+        setTimeout(emit, 80);
+      }
+    });
   }
 
   function shutdown() {
@@ -2244,6 +2352,40 @@ module.exports = function initMinicpmChat(ctx) {
     "minicpm:get-i18n": async () => {
       const lang = getLang();
       return minicpmI18n.getMinicpmI18nPayload(lang);
+    },
+    "minicpm:get-attention-summary": async () => {
+      try {
+        const { bus } = require("./attention-event-bus");
+        return bus.getRecentSummary(20);
+      } catch (err) {
+        return "No recent activity (error retrieving history).";
+      }
+    },
+    // v3 memory: RAG retrieval for the chat. Returns recent personal +
+    // world-knowledge hits relevant to the user's prompt so the renderer can
+    // prepend them as context. `enabled:false` when the backend is off.
+    "minicpm:memory-search": async (_evt, { query = "" } = {}) => {
+      const svc = typeof ctx.getMemoryService === "function" ? ctx.getMemoryService() : null;
+      if (!svc || typeof svc.isReady !== "function" || !svc.isReady()) {
+        return { enabled: false, memories: [] };
+      }
+      try {
+        const [personal, world] = await Promise.all([
+          svc.recallPersonal({ query, limit: 8 }),
+          svc.recallWorld({ query, limit: 8 }),
+        ]);
+        const norm = (arr) => (Array.isArray(arr) ? arr : (arr && arr.results) || [])
+          .map((m) => ({ content: m.content || m.text, category: m.category || "personal", id: m.id }));
+        return { enabled: true, memories: [...norm(personal), ...norm(world)] };
+      } catch (err) {
+        return { enabled: true, memories: [], error: err && err.message };
+      }
+    },
+    // v3 memory: tool-call surface — let the model persist a memory from chat.
+    "minicpm:memory-remember": async (_evt, { content, category = "personal" } = {}) => {
+      const svc = typeof ctx.getMemoryService === "function" ? ctx.getMemoryService() : null;
+      if (!svc) return { stored: false, reason: "no-service" };
+      return svc.add({ content, category });
     },
     "minicpm:resize": (_evt, { width, height } = {}) => {
       width = Math.max(MIN_WIDTH, Math.min(SPEAK_MAX_WIDTH, Math.round(Number(width) || ASK_WIDTH)));
@@ -3006,6 +3148,8 @@ module.exports = function initMinicpmChat(ctx) {
     toggle,
     dismiss,
     toggleThinking,
+    askConfirmation,
+    showMessage,
     warmup,
     onStateEvent,
     setNarrationEnabled,

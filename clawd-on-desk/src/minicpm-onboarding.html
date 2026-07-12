@@ -11,7 +11,8 @@
   <header class="steps" id="steps">
     <div class="step active" data-step="env-check"><span class="dot"><span class="num">1</span></span><span class="label" data-i18n="onboardingStepEnvCheck"></span></div>
     <div class="step" data-step="model"><span class="dot"><span class="num">2</span></span><span class="label" data-i18n="onboardingStepModel"></span></div>
-    <div class="step" data-step="ready"><span class="dot"><span class="num">3</span></span><span class="label" data-i18n="onboardingStepReady"></span></div>
+    <div class="step" data-step="extensions"><span class="dot"><span class="num">3</span></span><span class="label" data-i18n="onboardingStepExtensions"></span></div>
+    <div class="step" data-step="ready"><span class="dot"><span class="num">4</span></span><span class="label" data-i18n="onboardingStepReady"></span></div>
   </header>
 
   <section class="content">
@@ -97,6 +98,41 @@
       </div>
     </div>
 
+    <!-- Step 2.5: extensions + consent (plan §2 vision + §3.1 multi-browser) -->
+    <div class="panel hidden" data-panel="extensions">
+      <h1 data-i18n="onboardingExtensionsTitle"></h1>
+      <p class="lede" data-i18n="onboardingExtensionsLede"></p>
+      <ul class="browser-list" id="ext-browser-list"></ul>
+      <p class="dim hidden" id="ext-browser-none" data-i18n="onboardingExtensionsNoneFound"></p>
+
+      <div class="consent-block">
+        <h2 data-i18n="onboardingVisionConsentTitle"></h2>
+        <p data-i18n="onboardingVisionConsentDesc"></p>
+        <div class="vision-row">
+          <button class="btn primary" id="ext-vision-btn" data-i18n="onboardingVisionDownload"></button>
+          <span class="dim" id="ext-vision-status"></span>
+        </div>
+        <label class="consent-toggle">
+          <input type="checkbox" id="ext-consent-vision" checked>
+          <span data-i18n="onboardingVisionConsentAllow"></span>
+        </label>
+      </div>
+
+      <div class="consent-block">
+        <h2 data-i18n="onboardingAccessibilityConsentTitle"></h2>
+        <p data-i18n="onboardingAccessibilityConsentDesc"></p>
+        <label class="consent-toggle">
+          <input type="checkbox" id="ext-consent-a11y" checked>
+          <span data-i18n="onboardingAccessibilityConsentAllow"></span>
+        </label>
+      </div>
+
+      <div class="bottom">
+        <button class="btn ghost" data-back="model" data-i18n="onboardingBack"></button>
+        <button class="btn primary" id="extensions-next" data-i18n="onboardingNext"></button>
+      </div>
+    </div>
+
     <!-- Step 3: ready -->
     <div class="panel hidden" data-panel="ready">
       <h1 data-i18n="onboardingReadyTitle"></h1>
@@ -108,6 +144,7 @@
       </ul>
       <p class="dim" data-i18n="onboardingMoreHint"></p>
       <div class="bottom">
+        <button class="btn ghost" data-back="extensions" data-i18n="onboardingBack"></button>
         <button class="btn primary" id="ready-finish" data-i18n="onboardingFinish"></button>
       </div>
     </div>

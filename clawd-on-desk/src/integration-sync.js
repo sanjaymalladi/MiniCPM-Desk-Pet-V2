@@ -422,6 +422,31 @@ function createIntegrationSyncRuntime(options = {}) {
     }
   }
 
+  // ── Attention Adapters ────────────────────────────────────────────────────
+
+  function syncOpencodeAttentionAdapter() {
+    try {
+      if (typeof ctx.syncOpencodeAttentionAdapterImpl === "function") return ctx.syncOpencodeAttentionAdapterImpl();
+      const adapter = require("../hooks/opencode-focus-adapter.js");
+      // we don't start it here, main.js starts it if attention tracking is enabled
+      return { status: "ok" };
+    } catch (err) {
+      console.warn("Clawd: failed to sync opencode attention adapter:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync adapter" };
+    }
+  }
+
+  function syncKilocodeAttentionAdapter() {
+    try {
+      if (typeof ctx.syncKilocodeAttentionAdapterImpl === "function") return ctx.syncKilocodeAttentionAdapterImpl();
+      const adapter = require("../hooks/kilocode-focus-adapter.js");
+      return { status: "ok" };
+    } catch (err) {
+      console.warn("Clawd: failed to sync kilocode attention adapter:", err.message);
+      return { status: "error", message: err && err.message ? err.message : "Failed to sync adapter" };
+    }
+  }
+
   const AGENT_INTEGRATION_SYNCERS = Object.freeze({
     "gemini-cli": syncGeminiHooks,
     "antigravity-cli": syncAntigravityHooks,
@@ -518,6 +543,8 @@ function createIntegrationSyncRuntime(options = {}) {
     for (const [agentId, sync] of Object.entries(AGENT_INTEGRATION_SYNCERS)) {
       if (shouldSyncAgentIntegration(agentId)) sync();
     }
+    syncOpencodeAttentionAdapter();
+    syncKilocodeAttentionAdapter();
   }
 
   return {

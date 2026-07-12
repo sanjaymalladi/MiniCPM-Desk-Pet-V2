@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .clawd_state import ClawdBridge
-from .llama_client import LlamaServer, detect_backend
+from .llama_client import LlamaServer, VisionLlamaServer, detect_backend
 from .log_setup import get_logger
 from .think_filter import ThinkBlockFilter
 from .updater import DEFAULT_SOURCE as DEFAULT_UPDATE_SOURCE
@@ -303,6 +303,24 @@ def build_app(
         adapters=[initial_active] if initial_active else [],
     )
 
+    # Note: in a real deployment we'd load paths from MINICPM_VISION_MODEL_DIR or similar,
+    # but for now we look for the hardcoded MiniCPM-V 4.6 filename in the model roots.
+    # We resolve it lazily inside the route or at instantiation.
+    vision_model_path: Optional[Path] = None
+    vision_mmproj_path: Optional[Path] = None
+    for cand_root in _default_model_roots():
+        if (cand_root / "MiniCPM-V-4.6-Q4_K_M.gguf").exists() and (cand_root / "mmproj-MiniCPM-V-4.6-f16.gguf").exists():
+            vision_model_path = cand_root / "MiniCPM-V-4.6-Q4_K_M.gguf"
+            vision_mmproj_path = cand_root / "mmproj-MiniCPM-V-4.6-f16.gguf"
+            break
+
+    vision_server = VisionLlamaServer(
+        model_path=vision_model_path,
+        mmproj_path=vision_mmproj_path,
+        ctx_size=2048,
+        n_gpu_layers=n_gpu_layers,
+    )
+
     # In-memory adapter state. Single source of truth for what the
     # Electron app sees as "the active LoRA". Boots from the persisted
     # choice; cleared on /api/load-adapter {path:null}; updated to a
@@ -335,6 +353,7 @@ def build_app(
             bridge.post("sleeping")
             try:
                 await server.stop()
+                await vision_server.stop()
             finally:
                 bridge.close()
 
@@ -580,12 +599,99 @@ def build_app(
             "persona": _persona_for(target),
         }
 
+    # ─── Attention / classify ──────────────────────────────────────────
+
+    class ClassifyRequest(BaseModel):
+        messages: List[ChatMessage]
+        max_new_tokens: int = 64
+        temperature: float = 0.1   # low temp for deterministic JSON output
+        disable_adapter: bool = True  # bypass persona for neutral classification
+
     @app.post("/api/classify")
-    def classify_endpoint(payload: dict):
-        return JSONResponse(
-            {"error": "/api/classify not implemented for llama.cpp backend yet"},
-            status_code=501,
-        )
+    async def classify_endpoint(req: ClassifyRequest):
+        """Non-streaming classification call for the Attention Companion.
+
+        Calls MiniCPM5-1B with low temperature and JSON-object response_format.
+        Returns {"content": "<json string>"} matching the /api/chat non-stream shape
+        so the Electron AttentionStateManager can use the same JSON extraction logic.
+        """
+        if not server.alive:
+            return JSONResponse({"error": "llama-server not running"}, status_code=503)
+
+        msgs = [{"role": m.role, "content": m.content} for m in req.messages]
+        lora_arg: list[dict] | None = [] if req.disable_adapter else None
+
+        collected = []
+        try:
+            async for kind, text in server.stream_chat(
+                messages=msgs,
+                max_tokens=int(max(1, min(req.max_new_tokens, 128))),
+                temperature=req.temperature,
+                top_p=1.0,
+                top_k=1,
+                repetition_penalty=1.0,
+                enable_thinking=False,
+                lora=lora_arg,
+                response_format={"type": "json_object"},
+            ):
+                if kind == "content":
+                    collected.append(text)
+        except Exception as exc:
+            get_logger().warning("classify stream error: %s", exc)
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+        return JSONResponse({"content": "".join(collected), "thinking": None})
+
+    # ─── Vision analyze (Attention Companion — Phase 5) ────────────────
+
+    class VisionAnalyzeRequest(BaseModel):
+        screenshot_b64: str          # base64-encoded PNG of focused window region
+        task_hypothesis: str = ""    # current tracked task description
+        frames: List[str] = []       # optional extra frames for video confirmation
+
+    @app.post("/api/vision-analyze")
+    async def vision_analyze(req: VisionAnalyzeRequest):
+        """On-demand vision classification via MiniCPM-V 4.6.
+
+        The vision sidecar (VisionLlamaServer) is started cold on the first call
+        and shuts down after 30s of no further calls. This endpoint is called
+        only from the AMBIGUOUS branch of the Electron AttentionStateManager —
+        never from a timer or periodic loop.
+
+        Returns the same verdict shape the Electron Attention Companion expects from
+        its vision client: {"classification": "SAME_TASK"|"TASK_SWITCH_CONFIDENT"|"AMBIGUOUS", "reason": str}
+        """
+        if not vision_server.model_path or not vision_server.model_path.exists():
+            return JSONResponse({
+                "classification": "AMBIGUOUS",
+                "reason": "vision model not downloaded yet",
+            })
+
+        prompt = f"Given task: {req.task_hypothesis}. Is the user on-task, distracted, or unclear? Respond with ONLY one of: on_task / distraction / unclear"
+        try:
+            res = await vision_server.analyze_image(prompt, req.screenshot_b64)
+            content = res.get("choices", [{}])[0].get("message", {}).get("content", "").strip().lower()
+
+            # Map the model's on_task / distraction / unclear answer onto the
+            # Attention Companion's closed-form verdict enum (SAME_TASK /
+            # TASK_SWITCH_CONFIDENT / AMBIGUOUS) so this endpoint is a drop-in
+            # for attention-vision-client.js's documented verdict contract.
+            state = "AMBIGUOUS"
+            if "distraction" in content:
+                state = "TASK_SWITCH_CONFIDENT"
+            elif "on_task" in content or "on-task" in content:
+                state = "SAME_TASK"
+
+            return JSONResponse({
+                "classification": state,
+                "reason": content,
+            })
+        except Exception as exc:
+            get_logger().warning("vision_analyze error: %s", exc)
+            return JSONResponse({
+                "classification": "AMBIGUOUS",
+                "reason": f"vision analysis failed: {exc}",
+            })
 
     # ─── Updater ───────────────────────────────────────────────────────
 

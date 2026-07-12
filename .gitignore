@@ -42,6 +42,9 @@ findings.md
 progress.md
 .planning/
 CLAUDE.md
+session-ses_*.md
+v3_implementation_plan.md
+v3_plan_temp_implementation.md
 
 # Local env / secrets
 .env
@@ -55,6 +58,11 @@ runtime-port.json
 
 # Adapter manifest is rebuilt at runtime with machine-local absolute paths
 adapters/.manifest.json
+
+# Local memory sidecar state and credentials
+.supermemory/
+clawd-on-desk/.supermemory/
+.supermemory-credentials.json
 
 # uv lock — keep
 # (don't ignore uv.lock; it's needed for reproducible installs)

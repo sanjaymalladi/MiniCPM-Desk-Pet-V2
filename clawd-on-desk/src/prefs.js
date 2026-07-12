@@ -197,6 +197,50 @@ const SCHEMA = {
     validate: (v) => Number.isInteger(v) && v >= 0 && v <= 60000,
   },
   lowPowerIdleMode: { type: "boolean", default: false },
+  attentionEnabled: { type: "boolean", default: true },
+  attentionVisionEnabled: { type: "boolean", default: true },
+  // Plan §2 step 4 / §2 consent — vision (screenshot) verification only runs
+  // after the user explicitly grants it, distinct from the always-on text
+  // signal. Onboarding + Settings both write this; default off so no
+  // screenshot is ever taken without informed consent.
+  attentionVisionConsent: { type: "boolean", default: false },
+  // Plan §2 step 2 / §2 consent — OS accessibility-tree permission. The a11y
+  // pull never reads window content unless this is granted.
+  attentionAccessibilityConsent: { type: "boolean", default: false },
+  attentionDistractionMinutes: {
+    type: "number",
+    default: 5,
+    validate: (v) => Number.isInteger(v) && v >= 1 && v <= 60
+  },
+  // v2 gates
+  attentionIdleEnabled: { type: "boolean", default: true },
+  attentionIdleMinutes: {
+    type: "number",
+    default: 2,
+    validate: (v) => Number.isInteger(v) && v >= 1 && v <= 30,
+  },
+  attentionDwellMs: {
+    type: "number",
+    default: 4000,
+    validate: (v) => Number.isInteger(v) && v >= 0 && v <= 30000,
+  },
+  // Comma/semicolon-separated privacy substrings. Windows/domains whose
+  // app/title/url contains any entry are never evaluated or captured.
+  attentionPrivacyList: {
+    type: "string",
+    default: "incognito,inprivate,private browsing,1password,bitwarden,lastpass,bank,paypal,coinbase",
+  },
+  // §4 — observer features
+  attentionCheckInEnabled: { type: "boolean", default: true },
+  attentionWanderBudgetMinutes: {
+    type: "number",
+    default: 0,
+    validate: (v) => Number.isInteger(v) && v >= 0 && v <= 240,
+  },
+  attentionNudgeContract: { type: "string", default: "" },
+  attentionStuckEnabled: { type: "boolean", default: true },
+  attentionRecapEnabled: { type: "boolean", default: true },
+  attentionPatternsEnabled: { type: "boolean", default: false },
   mobilePreviewEnabled: { type: "boolean", default: false },
   // When true, prevent the OS from sleeping while any agent task is in
   // progress (working/thinking/etc.); allow sleep again once tasks finish.
@@ -366,6 +410,45 @@ const SCHEMA = {
     type: "object",
     defaultFactory: () => ({}),
     normalize: normalizeDismissedUpdateVersions,
+  },
+  // ── v3 Memory (Supermemory) ──
+  // Off by default (safety default). When enabled, the Electron app launches the
+  // self-hosted Supermemory sidecar as an always-on backend the model can read
+  // (RAG) and call as a tool during chat.
+  memoryEnabled: { type: "boolean", default: false },
+  // Launch the sidecar at program start (true) vs attach to an already-running
+  // server using the port/key below (false).
+  memoryAutoLaunch: { type: "boolean", default: true },
+  // Port/key used when memoryAutoLaunch is false. When autoLaunch is true, the
+  // apiKey is discovered from the sidecar boot banner and not read from here.
+  memoryPort: { type: "number", default: 6767, validate: (v) => Number.isInteger(v) && v > 0 && v < 65536 },
+  memoryApiKey: { type: "string", default: "" },
+  // Data directory for Supermemory's graph engine. Empty = its default.
+  memoryDataDir: { type: "string", default: "" },
+  // OpenAI-compatible endpoint Supermemory uses for extraction/summarize.
+  memoryLlmBaseUrl: { type: "string", default: "http://127.0.0.1:18765/v1" },
+  memoryLlmApiKey: { type: "string", default: "local" },
+  // Proactive messaging (plan §4): mute + quiet hours.
+  memoryMuted: { type: "boolean", default: false },
+  memoryQuietStart: { type: "number", default: 22, validate: (v) => Number.isInteger(v) && v >= 0 && v <= 23 },
+  memoryQuietEnd: { type: "number", default: 8, validate: (v) => Number.isInteger(v) && v >= 0 && v <= 23 },
+  // Feature toggles for the individual v3 surfaces.
+  memoryWorldEnabled: { type: "boolean", default: true },
+  memoryGoalEnabled: { type: "boolean", default: true },
+  memoryProactiveEnabled: { type: "boolean", default: true },
+  memoryVideoEnabled: { type: "boolean", default: true },
+  // User-editable world-knowledge research topics (plan §1.3.2). Stored as an
+  // array of strings; the Settings UI edits them as one-per-line text.
+  memoryWorldTopics: {
+    type: "array",
+    default: [],
+    validate: (v) => Array.isArray(v) && v.every((x) => typeof x === "string"),
+  },
+  // AI-news RSS feed URL pulled during idle time and distilled into
+  // world-knowledge (plan §1.3). Empty = use DEFAULT_WORLD_RSS_URL.
+  memoryWorldRssUrl: {
+    type: "string",
+    default: "",
   },
 };
 

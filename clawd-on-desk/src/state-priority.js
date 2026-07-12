@@ -12,6 +12,8 @@ const STATE_PRIORITY = Object.freeze({
   notification: 7,
   sweeping: 6,
   attention: 5,
+  "asking-confirmation": 5,
+  distracted: 4,
   carrying: 4,
   juggling: 4,
   working: 3,
@@ -21,7 +23,7 @@ const STATE_PRIORITY = Object.freeze({
   sleeping: 0,
 });
 
-const ONESHOT_STATE_NAMES = ["attention", "error", "sweeping", "notification", "carrying"];
+const ONESHOT_STATE_NAMES = ["attention", "asking-confirmation", "error", "sweeping", "notification", "carrying"];
 
 const SLEEP_SEQUENCE = new Set(SLEEP_SEQUENCE_STATES);
 const ONESHOT_STATES = new Set(ONESHOT_STATE_NAMES);
